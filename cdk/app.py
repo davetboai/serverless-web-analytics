@@ -8,7 +8,8 @@ domain_name = app.node.try_get_context("domain_name")  # e.g. analytics.davetbo.
 hosted_zone_id = app.node.try_get_context("hosted_zone_id")
 hosted_zone_name = app.node.try_get_context("hosted_zone_name")
 certificate_arn = app.node.try_get_context("certificate_arn")
-dashboard_password = app.node.try_get_context("dashboard_password") or ""
+cognito_user_pool_id = app.node.try_get_context("cognito_user_pool_id")
+cognito_client_id = app.node.try_get_context("cognito_client_id")
 
 AnalyticsStack(
     app,
@@ -17,7 +18,8 @@ AnalyticsStack(
     hosted_zone_id=hosted_zone_id,
     hosted_zone_name=hosted_zone_name,
     certificate_arn=certificate_arn,
-    dashboard_password=dashboard_password,
+    cognito_user_pool_id=cognito_user_pool_id,
+    cognito_client_id=cognito_client_id,
     env=cdk.Environment(region="us-east-1"),
 )
 
