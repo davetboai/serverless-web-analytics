@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+cdk.out/
+node_modules/
+.env
+*.egg-info/

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Analytics</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Analytics</h1>
+    <div class="controls">
+      <select id="site-select"><option value="">Loading sites...</option></select>
+      <select id="range-select">
+        <option value="7">Last 7 days</option>
+        <option value="30" selected>Last 30 days</option>
+        <option value="90">Last 90 days</option>
+      </select>
+    </div>
+  </header>
+
+  <div class="stats-grid" id="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Pageviews</div>
+      <div class="stat-value" id="total-pageviews">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Unique Visitors</div>
+      <div class="stat-value" id="total-visitors">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Pages / Visitor</div>
+      <div class="stat-value" id="pages-per-visitor">—</div>
+    </div>
+  </div>
+
+  <div class="chart-container">
+    <canvas id="traffic-chart"></canvas>
+  </div>
+
+  <div class="tables-grid">
+    <div class="table-card">
+      <h3>Top Pages</h3>
+      <table id="top-pages"><tbody></tbody></table>
+    </div>
+    <div class="table-card">
+      <h3>Referrers</h3>
+      <table id="top-referrers"><tbody></tbody></table>
+    </div>
+    <div class="table-card">
+      <h3>Countries</h3>
+      <table id="countries"><tbody></tbody></table>
+    </div>
+    <div class="table-card">
+      <h3>Devices</h3>
+      <table id="devices"><tbody></tbody></table>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
