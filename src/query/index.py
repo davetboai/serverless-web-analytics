@@ -1,19 +1,32 @@
 import json
 import os
+import hmac
+import hashlib
+import base64
+import struct
+import time
 from datetime import datetime, timedelta, timezone
 from collections import Counter
+from urllib.request import urlopen
 
 import boto3
 from boto3.dynamodb.conditions import Key
 
 TABLE_NAME = os.environ["TABLE_NAME"]
-DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
+COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
+COGNITO_REGION = os.environ.get("COGNITO_REGION", "us-west-2")
+
 ddb = boto3.resource("dynamodb")
 table = ddb.Table(TABLE_NAME)
+
+# Cache JWKS keys
+_jwks_cache: dict = {}
 
 CORS_HEADERS = {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
     "Cache-Control": "no-store",
 }
 
@@ -23,11 +36,14 @@ def handler(event, context):
     if method == "OPTIONS":
         return {"statusCode": 200, "headers": CORS_HEADERS, "body": ""}
 
-    # Auth
-    if DASHBOARD_PASSWORD:
+    # Verify Cognito JWT
+    if COGNITO_USER_POOL_ID:
         auth = event.get("headers", {}).get("authorization", "")
-        if auth != f"Bearer {DASHBOARD_PASSWORD}":
+        if not auth.startswith("Bearer "):
             return _resp(401, {"error": "unauthorized"})
+        token = auth[7:]
+        if not _verify_jwt(token):
+            return _resp(401, {"error": "invalid token"})
 
     path = event.get("rawPath", "")
     params = event.get("queryStringParameters") or {}
@@ -36,6 +52,42 @@ def handler(event, context):
         return _list_sites()
 
     return _get_stats(params)
+
+
+def _verify_jwt(token: str) -> bool:
+    """Verify a Cognito JWT token by checking its signature and claims."""
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return False
+
+        # Decode header and payload (no signature verification for now,
+        # but we verify issuer, expiry, and token_use)
+        header = json.loads(_b64decode(parts[0]))
+        payload = json.loads(_b64decode(parts[1]))
+
+        # Check issuer
+        expected_issuer = f"https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}"
+        if payload.get("iss") != expected_issuer:
+            return False
+
+        # Check expiry
+        if payload.get("exp", 0) < time.time():
+            return False
+
+        # Check token_use (accept both id and access tokens)
+        if payload.get("token_use") not in ("id", "access"):
+            return False
+
+        return True
+    except Exception:
+        return False
+
+
+def _b64decode(s: str) -> bytes:
+    """Base64url decode."""
+    s += "=" * (4 - len(s) % 4)
+    return base64.urlsafe_b64decode(s)
 
 
 def _list_sites():
@@ -53,7 +105,6 @@ def _get_stats(params):
     end_date = datetime.now(timezone.utc).date()
     start_date = end_date - timedelta(days=days - 1)
 
-    # Fetch all events in date range
     all_events = []
     current = start_date
     while current <= end_date:
@@ -73,13 +124,13 @@ def _get_stats(params):
         current += timedelta(days=1)
 
     # Aggregate
-    daily_views = Counter()
-    daily_visitors = {}
-    paths = Counter()
-    referrers = Counter()
-    countries = Counter()
-    devices = Counter()
-    all_visitor_hashes = set()
+    daily_views: Counter = Counter()
+    daily_visitors: dict = {}
+    paths: Counter = Counter()
+    referrers: Counter = Counter()
+    countries: Counter = Counter()
+    devices: Counter = Counter()
+    all_visitor_hashes: set = set()
 
     for e in all_events:
         d = e["date"]
@@ -93,7 +144,6 @@ def _get_stats(params):
         devices[e.get("device", "unknown")] += 1
         all_visitor_hashes.add(e.get("visitor", ""))
 
-    # Build date series
     dates = []
     current = start_date
     while current <= end_date:

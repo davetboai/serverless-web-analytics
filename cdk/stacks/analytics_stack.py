@@ -5,6 +5,8 @@ from aws_cdk import (
     Stack,
     Duration,
     RemovalPolicy,
+    BundlingOptions,
+    DockerImage,
     aws_dynamodb as dynamodb,
     aws_lambda as _lambda,
     aws_s3 as s3,
@@ -31,7 +33,8 @@ class AnalyticsStack(Stack):
         hosted_zone_id: str,
         hosted_zone_name: str,
         certificate_arn: str,
-        dashboard_password: str,
+        cognito_user_pool_id: str,
+        cognito_client_id: str,
         **kwargs,
     ):
         super().__init__(scope, construct_id, **kwargs)
@@ -47,7 +50,7 @@ class AnalyticsStack(Stack):
             time_to_live_attribute="ttl",
         )
 
-        # --- Collector Lambda ---
+        # --- Collector Lambda (public — no auth needed for tracking beacons) ---
         collector_fn = _lambda.Function(
             self,
             "Collector",
@@ -63,7 +66,7 @@ class AnalyticsStack(Stack):
             auth_type=_lambda.FunctionUrlAuthType.NONE,
         )
 
-        # --- Query Lambda ---
+        # --- Query Lambda (auth via Cognito JWT) ---
         query_fn = _lambda.Function(
             self,
             "Query",
@@ -72,7 +75,8 @@ class AnalyticsStack(Stack):
             code=_lambda.Code.from_asset(str(SRC / "query")),
             environment={
                 "TABLE_NAME": table.table_name,
-                "DASHBOARD_PASSWORD": dashboard_password,
+                "COGNITO_USER_POOL_ID": cognito_user_pool_id,
+                "COGNITO_REGION": kwargs.get("env", cdk.Environment()).region or "us-west-2",
             },
             timeout=Duration.seconds(30),
             memory_size=256,
@@ -90,74 +94,34 @@ class AnalyticsStack(Stack):
             auto_delete_objects=True,
         )
 
-        # --- CloudFront Function for dashboard basic auth ---
-        auth_fn = cloudfront.Function(
-            self,
-            "DashboardAuth",
-            code=cloudfront.FunctionCode.from_inline(
-                f"""
-function handler(event) {{
-    var request = event.request;
-    var uri = request.uri;
-
-    // Allow tracker script and collect API without auth
-    if (uri === '/script.js' || uri.startsWith('/api/')) {{
-        return request;
-    }}
-
-    var password = '{dashboard_password}';
-    if (!password) return request;
-
-    var headers = request.headers;
-    var auth = headers.authorization;
-    var expected = 'Basic ' + '{{}}'.replace('{{}}',
-        // base64 of admin:<password>
-        _btoa('admin:' + password)
-    );
-
-    if (!auth || auth.value !== expected) {{
-        return {{
-            statusCode: 401,
-            statusDescription: 'Unauthorized',
-            headers: {{
-                'www-authenticate': {{ value: 'Basic realm="Analytics"' }}
-            }}
-        }};
-    }}
-    return request;
-}}
-
-function _btoa(s) {{
-    var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-    var out = '';
-    for (var i = 0; i < s.length; i += 3) {{
-        var b = (s.charCodeAt(i) << 16)
-              | ((i+1 < s.length ? s.charCodeAt(i+1) : 0) << 8)
-              | (i+2 < s.length ? s.charCodeAt(i+2) : 0);
-        for (var j = 0; j < 4; j++) {{
-            if (i * 8 + j * 6 > s.length * 8) out += '=';
-            else out += chars.charAt((b >>> (18 - j*6)) & 63);
-        }}
-    }}
-    return out;
-}}
-"""
+        # --- Build dashboard React app via Docker ---
+        dashboard_asset = s3deploy.Source.asset(
+            str(SRC / "dashboard"),
+            bundling=BundlingOptions(
+                image=DockerImage.from_registry("node:20-slim"),
+                command=[
+                    "bash", "-c",
+                    "cp -r /asset-input/. /tmp/build && cd /tmp/build"
+                    " && npm install"
+                    " && npx vite build"
+                    " && cp -r /tmp/build/dist/* /asset-output/",
+                ],
+                environment={
+                    "VITE_COGNITO_USER_POOL_ID": cognito_user_pool_id,
+                    "VITE_COGNITO_CLIENT_ID": cognito_client_id,
+                },
+                user="root",
             ),
-            runtime=cloudfront.FunctionRuntime.JS_2_0,
         )
 
         # --- CloudFront distribution ---
         certificate = acm.Certificate.from_certificate_arn(
             self, "Cert", certificate_arn
         )
-
-        # OAC for S3
         oac = cloudfront.S3OriginAccessControl(self, "OAC")
         s3_origin = origins.S3BucketOrigin.with_origin_access_control(
             site_bucket, origin_access_control=oac
         )
-
-        # Lambda Function URL origins
         collector_origin = origins.FunctionUrlOrigin(collector_url)
         query_origin = origins.FunctionUrlOrigin(query_url)
 
@@ -167,12 +131,6 @@ function _btoa(s) {{
             default_behavior=cloudfront.BehaviorOptions(
                 origin=s3_origin,
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-                function_associations=[
-                    cloudfront.FunctionAssociation(
-                        function=auth_fn,
-                        event_type=cloudfront.FunctionEventType.VIEWER_REQUEST,
-                    )
-                ],
             ),
             additional_behaviors={
                 "/script.js": cloudfront.BehaviorOptions(
@@ -205,16 +163,34 @@ function _btoa(s) {{
             domain_names=[domain_name],
             certificate=certificate,
             default_root_object="index.html",
+            error_responses=[
+                cloudfront.ErrorResponse(
+                    http_status=403,
+                    response_http_status=200,
+                    response_page_path="/index.html",
+                    ttl=Duration.seconds(0),
+                ),
+                cloudfront.ErrorResponse(
+                    http_status=404,
+                    response_http_status=200,
+                    response_page_path="/index.html",
+                    ttl=Duration.seconds(0),
+                ),
+            ],
         )
 
-        # --- Deploy dashboard + tracker to S3 ---
+        # --- Deploy dashboard build + tracker script to S3 ---
         s3deploy.BucketDeployment(
             self,
             "DeployDashboard",
-            sources=[
-                s3deploy.Source.asset(str(SRC / "dashboard")),
-                s3deploy.Source.asset(str(SRC / "tracker")),
-            ],
+            sources=[dashboard_asset],
+            destination_bucket=site_bucket,
+            distribution=distribution,
+        )
+        s3deploy.BucketDeployment(
+            self,
+            "DeployTracker",
+            sources=[s3deploy.Source.asset(str(SRC / "tracker"))],
             destination_bucket=site_bucket,
             distribution=distribution,
         )
@@ -224,21 +200,19 @@ function _btoa(s) {{
             self, "Zone", hosted_zone_id=hosted_zone_id, zone_name=hosted_zone_name
         )
         route53.ARecord(
-            self,
-            "ARecord",
-            zone=zone,
-            record_name=domain_name,
+            self, "ARecord", zone=zone, record_name=domain_name,
             target=route53.RecordTarget.from_alias(targets.CloudFrontTarget(distribution)),
         )
         route53.AaaaRecord(
-            self,
-            "AAAARecord",
-            zone=zone,
-            record_name=domain_name,
+            self, "AAAARecord", zone=zone, record_name=domain_name,
             target=route53.RecordTarget.from_alias(targets.CloudFrontTarget(distribution)),
         )
 
         # --- Outputs ---
         CfnOutput(self, "DashboardUrl", value=f"https://{domain_name}")
-        CfnOutput(self, "TrackingScript", value=f'<script defer src="https://{domain_name}/script.js" data-website-id="YOUR_SITE_ID"></script>')
+        CfnOutput(
+            self,
+            "TrackingScript",
+            value=f'<script defer src="https://{domain_name}/script.js" data-website-id="YOUR_SITE_ID"></script>',
+        )
         CfnOutput(self, "TableName", value=table.table_name)
