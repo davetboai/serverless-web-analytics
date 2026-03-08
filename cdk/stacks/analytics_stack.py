@@ -16,8 +16,11 @@ from aws_cdk import (
     aws_certificatemanager as acm,
     aws_route53 as route53,
     aws_route53_targets as targets,
+    aws_apigatewayv2 as apigwv2,
     CfnOutput,
 )
+from aws_cdk.aws_apigatewayv2_integrations import HttpLambdaIntegration
+from aws_cdk.aws_apigatewayv2_authorizers import HttpJwtAuthorizer
 from constructs import Construct
 
 SRC = Path(__file__).resolve().parent.parent.parent / "src"
@@ -66,24 +69,66 @@ class AnalyticsStack(Stack):
             auth_type=_lambda.FunctionUrlAuthType.NONE,
         )
 
-        # --- Query Lambda (auth via Cognito JWT) ---
+        # --- Query Lambda (auth handled by API Gateway JWT authorizer) ---
         query_fn = _lambda.Function(
             self,
             "Query",
             runtime=_lambda.Runtime.PYTHON_3_13,
             handler="index.handler",
             code=_lambda.Code.from_asset(str(SRC / "query")),
-            environment={
-                "TABLE_NAME": table.table_name,
-                "COGNITO_USER_POOL_ID": cognito_user_pool_id,
-                "COGNITO_REGION": kwargs.get("env", cdk.Environment()).region or "us-west-2",
-            },
+            environment={"TABLE_NAME": table.table_name},
             timeout=Duration.seconds(30),
             memory_size=256,
         )
-        table.grant_read_data(query_fn)
-        query_url = query_fn.add_function_url(
-            auth_type=_lambda.FunctionUrlAuthType.NONE,
+        table.grant_read_write_data(query_fn)
+
+        # --- HTTP API Gateway with Cognito JWT authorizer ---
+        region = kwargs.get("env", cdk.Environment()).region or "us-east-1"
+        cognito_issuer = f"https://cognito-idp.{region}.amazonaws.com/{cognito_user_pool_id}"
+
+        jwt_authorizer = HttpJwtAuthorizer(
+            "CognitoAuthorizer",
+            jwt_issuer=cognito_issuer,
+            jwt_audience=[cognito_client_id],
+        )
+
+        query_integration = HttpLambdaIntegration("QueryIntegration", handler=query_fn)
+
+        api = apigwv2.HttpApi(
+            self,
+            "QueryApi",
+            cors_preflight=apigwv2.CorsPreflightOptions(
+                allow_origins=["*"],
+                allow_methods=[
+                    apigwv2.CorsHttpMethod.GET,
+                    apigwv2.CorsHttpMethod.POST,
+                    apigwv2.CorsHttpMethod.PUT,
+                    apigwv2.CorsHttpMethod.DELETE,
+                    apigwv2.CorsHttpMethod.OPTIONS,
+                ],
+                allow_headers=["Authorization", "Content-Type"],
+            ),
+            default_authorizer=jwt_authorizer,
+        )
+        api.add_routes(
+            path="/api/query",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=query_integration,
+        )
+        api.add_routes(
+            path="/api/sites",
+            methods=[
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.POST,
+                apigwv2.HttpMethod.PUT,
+                apigwv2.HttpMethod.DELETE,
+            ],
+            integration=query_integration,
+        )
+        api.add_routes(
+            path="/api/live",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=query_integration,
         )
 
         # --- S3 bucket for dashboard + tracker script ---
@@ -123,7 +168,10 @@ class AnalyticsStack(Stack):
             site_bucket, origin_access_control=oac
         )
         collector_origin = origins.FunctionUrlOrigin(collector_url)
-        query_origin = origins.FunctionUrlOrigin(query_url)
+
+        # API Gateway origin for authenticated query endpoints
+        api_domain = f"{api.api_id}.execute-api.{region}.amazonaws.com"
+        query_origin = origins.HttpOrigin(api_domain)
 
         distribution = cloudfront.Distribution(
             self,
@@ -150,7 +198,7 @@ class AnalyticsStack(Stack):
                     viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                     cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
                     origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
-                    allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
+                    allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
                 ),
                 "/api/sites": cloudfront.BehaviorOptions(
                     origin=query_origin,
@@ -158,6 +206,13 @@ class AnalyticsStack(Stack):
                     cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
                     origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
                     allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
+                ),
+                "/api/live": cloudfront.BehaviorOptions(
+                    origin=query_origin,
+                    viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                    cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
+                    origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                    allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
                 ),
             },
             domain_names=[domain_name],

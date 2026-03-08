@@ -63,30 +63,118 @@ def handler(event, context):
         except Exception:
             pass
 
+    event_type = body.get("type", "pageview")
+    session_id = (body.get("ses") or "")[:16]
+
     # TTL: 13 months
     ttl = int(now.timestamp()) + (86400 * 395)
 
+    # Update live visitor presence (5-minute TTL)
+    live_ttl = int(now.timestamp()) + 300
+    table.put_item(Item={
+        "pk": f"LIVE#{site_id}",
+        "sk": visitor_hash,
+        "ttl": live_ttl,
+    })
+
+    if event_type == "ping":
+        # Update session duration — write a session heartbeat record
+        duration = min(int(body.get("dur", 0) or 0), 86400)
+        if session_id and duration > 0:
+            table.update_item(
+                Key={
+                    "pk": f"SESSION#{site_id}#{date_str}",
+                    "sk": f"{visitor_hash}#{session_id}",
+                },
+                UpdateExpression="SET #dur = if_not_exists(#dur, :zero) + :dur, #ttl = :ttl",
+                ExpressionAttributeNames={"#dur": "duration", "#ttl": "ttl"},
+                ExpressionAttributeValues={":dur": duration, ":zero": 0, ":ttl": ttl},
+            )
+        return _resp(200, "ok")
+
+    path_val = (body.get("url") or "/")[:512]
+    country = event.get("headers", {}).get("cloudfront-viewer-country", "XX")
+
+    # Pageview event (raw)
     item = {
         "pk": f"{site_id}#{date_str}",
         "sk": f"{now.isoformat()}#{uuid.uuid4().hex[:8]}",
-        "path": (body.get("url") or "/")[:512],
+        "path": path_val,
         "referrer": ref_domain[:256],
-        "country": event.get("headers", {}).get("cloudfront-viewer-country", "XX"),
+        "country": country,
         "device": device,
         "screen": f"{sw}x{int(body.get('sh', 0) or 0)}",
         "language": (body.get("lang") or "")[:16],
         "visitor": visitor_hash,
+        "session": session_id,
         "ttl": ttl,
     }
     table.put_item(Item=item)
 
-    # Auto-register site
-    table.put_item(
-        Item={"pk": "SITES", "sk": site_id, "domain": ref_domain or site_id},
-        ConditionExpression="attribute_not_exists(pk)",
-    ) if False else _register_site(site_id)
+    # Update daily summary counters (atomic increments)
+    _update_summary(site_id, date_str, ttl, path_val, ref_domain, country, device, visitor_hash, session_id)
+
+    _register_site(site_id)
 
     return _resp(200, "ok")
+
+
+def _update_summary(site_id, date_str, ttl, path_val, ref_domain, country, device, visitor_hash, session_id):
+    """Atomically increment daily summary counters (two-step for nested maps)."""
+    safe_path = path_val.replace("#", "_").replace(".", "_")[:64]
+    safe_ref = ref_domain.replace("#", "_").replace(".", "_")[:64] if ref_domain else ""
+    key = {"pk": f"SUMMARY#{site_id}", "sk": date_str}
+
+    try:
+        # Step 1: Ensure item exists with map scaffolding + increment top-level counters
+        add_parts = ["pageviews :one", "visitors :vset"]
+        attr_values = {
+            ":one": 1, ":vset": {visitor_hash},
+            ":ttl": ttl, ":empty_map": {},
+        }
+        if session_id:
+            add_parts.append("sessions :sset")
+            attr_values[":sset"] = {f"{visitor_hash}#{session_id}"}
+
+        table.update_item(
+            Key=key,
+            UpdateExpression=(
+                "SET #paths = if_not_exists(#paths, :empty_map), "
+                "#countries = if_not_exists(#countries, :empty_map), "
+                "#devices = if_not_exists(#devices, :empty_map), "
+                "#referrers = if_not_exists(#referrers, :empty_map), "
+                "#ttl = :ttl "
+                "ADD " + ", ".join(add_parts)
+            ),
+            ExpressionAttributeNames={
+                "#paths": "paths", "#countries": "countries",
+                "#devices": "devices", "#referrers": "referrers", "#ttl": "ttl",
+            },
+            ExpressionAttributeValues=attr_values,
+        )
+
+        # Step 2: Increment nested map counters
+        set_parts = [
+            "paths.#p = if_not_exists(paths.#p, :zero) + :one",
+            "countries.#c = if_not_exists(countries.#c, :zero) + :one",
+            "devices.#d = if_not_exists(devices.#d, :zero) + :one",
+        ]
+        names = {"#p": safe_path, "#c": country, "#d": device}
+        vals = {":one": 1, ":zero": 0}
+
+        if safe_ref:
+            set_parts.append("referrers.#r = if_not_exists(referrers.#r, :zero) + :one")
+            names["#r"] = safe_ref
+
+        table.update_item(
+            Key=key,
+            UpdateExpression="SET " + ", ".join(set_parts),
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=vals,
+        )
+    except Exception:
+        # Don't fail the request if summary update fails — raw data is already written
+        pass
 
 
 def _register_site(site_id):
