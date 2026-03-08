@@ -84,7 +84,9 @@ class AnalyticsStack(Stack):
 
         # --- HTTP API Gateway with Cognito JWT authorizer ---
         region = kwargs.get("env", cdk.Environment()).region or "us-east-1"
-        cognito_issuer = f"https://cognito-idp.{region}.amazonaws.com/{cognito_user_pool_id}"
+        # Cognito pool may be in a different region — extract from pool ID (e.g. us-west-2_abc)
+        cognito_region = cognito_user_pool_id.rsplit("_", 1)[0] if "_" in cognito_user_pool_id else region
+        cognito_issuer = f"https://cognito-idp.{cognito_region}.amazonaws.com/{cognito_user_pool_id}"
 
         jwt_authorizer = HttpJwtAuthorizer(
             "CognitoAuthorizer",
