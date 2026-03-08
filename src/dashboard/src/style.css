@@ -43,7 +43,7 @@ h1 { font-size: 24px; font-weight: 700; }
   color: #64748b;
 }
 
-.btn-logout {
+.btn-logout, .btn-export {
   background: #1e293b;
   color: #94a3b8;
   border: 1px solid #334155;
@@ -53,12 +53,13 @@ h1 { font-size: 24px; font-weight: 700; }
   cursor: pointer;
   transition: background 0.15s;
 }
-.btn-logout:hover { background: #334155; }
+.btn-logout:hover, .btn-export:hover { background: #334155; }
 
 .controls {
   display: flex;
   gap: 8px;
   margin-bottom: 24px;
+  flex-wrap: wrap;
 }
 
 select {
@@ -71,36 +72,69 @@ select {
   cursor: pointer;
 }
 
+.error {
+  background: #3b1219;
+  border: 1px solid #7f1d1d;
+  color: #fca5a5;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+
 .loading {
   text-align: center;
   color: #64748b;
   padding: 48px;
 }
 
+.live-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  color: #22c55e;
+  font-weight: 600;
+}
+
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
   margin-bottom: 24px;
 }
 
 .stat-card {
   background: #1e293b;
   border-radius: 8px;
-  padding: 20px;
+  padding: 16px 20px;
   border: 1px solid #334155;
 }
 
 .stat-label {
-  font-size: 12px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: #94a3b8;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .stat-value {
-  font-size: 32px;
+  font-size: 28px;
   font-weight: 700;
   color: #f1f5f9;
 }
@@ -115,7 +149,7 @@ select {
 
 .tables-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 16px;
 }
 
@@ -127,7 +161,7 @@ select {
 }
 
 .table-card h3 {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   margin-bottom: 12px;
   color: #94a3b8;
@@ -135,10 +169,105 @@ select {
   letter-spacing: 0.05em;
 }
 
-table { width: 100%; }
-tr { border-bottom: 1px solid #1e293b; }
+table { width: 100%; border-collapse: collapse; }
+tr { border-bottom: 1px solid #263044; }
 tr:last-child { border: none; }
-td { padding: 6px 0; font-size: 14px; }
-td:last-child { text-align: right; font-weight: 600; color: #0ea5e9; }
+td { padding: 7px 0; font-size: 14px; }
+td:last-child { text-align: right; font-weight: 600; color: #0ea5e9; white-space: nowrap; padding-left: 12px; }
+
+.bar-cell {
+  position: relative;
+  overflow: hidden;
+}
+
+.bar-bg {
+  position: absolute;
+  left: 0;
+  top: 2px;
+  bottom: 2px;
+  background: rgba(14, 165, 233, 0.1);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.bar-label {
+  position: relative;
+  z-index: 1;
+  word-break: break-all;
+}
 
 .empty { color: #475569; font-style: italic; font-size: 14px; }
+
+.manage-sites {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 24px;
+}
+
+.manage-add {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.manage-add input {
+  background: #0f172a;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 14px;
+  flex: 1;
+  min-width: 140px;
+}
+
+.manage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.manage-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid #263044;
+}
+
+.manage-row:last-child { border: none; }
+
+.manage-id {
+  font-weight: 600;
+  font-size: 14px;
+  min-width: 120px;
+}
+
+.manage-domain {
+  flex: 1;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.btn-danger {
+  background: #3b1219;
+  color: #fca5a5;
+  border: 1px solid #7f1d1d;
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-danger:hover { background: #5b1d28; }
+
+@media (max-width: 640px) {
+  #root { padding: 16px; }
+  .stat-value { font-size: 22px; }
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .tables-grid { grid-template-columns: 1fr; }
+  header { flex-direction: column; align-items: flex-start; }
+}
