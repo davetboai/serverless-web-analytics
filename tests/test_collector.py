@@ -371,6 +371,29 @@ def test_custom_event_missing_name(ddb_table):
     assert result["statusCode"] == 400
 
 
+def test_ipv6_visitor_stability(ddb_table):
+    """IPv6 privacy extensions should not create new visitors — only /64 prefix is used."""
+    collector = load_collector()
+
+    # Two requests from same /64 prefix but different interface IDs
+    for ip in ["2605:a601:a7cd:2900:8669:3eca:be9a:7235", "2605:a601:a7cd:2900:1111:2222:3333:4444"]:
+        event = make_event(
+            {"sid": "test-site", "url": "/", "ses": "s1"},
+            headers={
+                "user-agent": "Mozilla/5.0 Test",
+                "x-forwarded-for": ip,
+                "cloudfront-viewer-country": "US",
+            },
+        )
+        collector.handler(event, None)
+
+    items = ddb_table.scan()["Items"]
+    summaries = [i for i in items if i["pk"].startswith("SUMMARY#")]
+    assert len(summaries) == 1
+    # Should be 1 unique visitor, not 2
+    assert len(summaries[0]["visitors"]) == 1
+
+
 def test_path_strips_query_string(ddb_table):
     """Stored path should not include query parameters."""
     collector = load_collector()

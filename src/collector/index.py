@@ -124,6 +124,11 @@ def handler(event, context):
 
     # Visitor hash (privacy: never store raw IP)
     ip = event.get("headers", {}).get("x-forwarded-for", "").split(",")[0].strip()
+    # For IPv6, use only the /64 prefix (first 4 groups) to avoid hash churn
+    # from privacy extensions rotating the interface identifier
+    if ":" in ip:
+        parts = ip.split(":")
+        ip = ":".join(parts[:4])
     visitor_hash = hashlib.sha256(f"{ip}:{ua}:{site_id}".encode()).hexdigest()[:16]
 
     now = datetime.now(timezone.utc)
