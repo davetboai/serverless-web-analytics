@@ -121,6 +121,58 @@ def test_rename_site(ddb_table):
     assert item["domain"] == "new.com"
 
 
+def test_get_stats_with_new_fields(ddb_table):
+    """Verify browsers, oses, languages, UTM, and entry/exit pages in query response."""
+    query = load_query()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    ddb_table.put_item(Item={
+        "pk": "SUMMARY#test-site",
+        "sk": today,
+        "pageviews": 10,
+        "visitors": {"v1"},
+        "sessions": {"v1#s1"},
+        "paths": {"/": 10},
+        "countries": {"US": 10},
+        "devices": {"desktop": 10},
+        "referrers": {},
+        "browsers": {"Chrome": 7, "Firefox": 3},
+        "oses": {"Windows": 6, "macOS": 4},
+        "languages": {"en-US": 8, "es": 2},
+        "utm_sources": {"google": 3},
+        "utm_mediums": {"cpc": 3},
+        "utm_campaigns": {"spring": 3},
+        "ttl": 9999999999,
+    })
+
+    # Add session records with entry/exit pages
+    ddb_table.put_item(Item={
+        "pk": f"SESSION#test-site#{today}",
+        "sk": "v1#s1",
+        "duration": 120,
+        "entry_page": "/home",
+        "exit_page": "/pricing",
+        "ttl": 9999999999,
+    })
+
+    event = make_event({}, method="GET", path="/api/query")
+    event["queryStringParameters"] = {"site_id": "test-site", "days": "1"}
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert len(body["browsers"]) == 2
+    assert body["browsers"][0]["name"] == "Chrome"
+    assert body["browsers"][0]["count"] == 7
+    assert len(body["oses"]) == 2
+    assert len(body["languages"]) == 2
+    assert body["utmSources"][0]["name"] == "google"
+    assert body["utmMediums"][0]["name"] == "cpc"
+    assert body["utmCampaigns"][0]["name"] == "spring"
+    assert body["entryPages"][0]["path"] == "/home"
+    assert body["exitPages"][0]["path"] == "/pricing"
+
+
 def test_get_live_empty(ddb_table):
     query = load_query()
     event = make_event({}, method="GET", path="/api/live")

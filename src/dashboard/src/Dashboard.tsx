@@ -42,6 +42,14 @@ interface StatsData {
   topReferrers: { domain: string; count: number }[];
   countries: { code: string; count: number }[];
   devices: Record<string, number>;
+  browsers: { name: string; count: number }[];
+  oses: { name: string; count: number }[];
+  languages: { code: string; count: number }[];
+  utmSources: { name: string; count: number }[];
+  utmMediums: { name: string; count: number }[];
+  utmCampaigns: { name: string; count: number }[];
+  entryPages: { path: string; count: number }[];
+  exitPages: { path: string; count: number }[];
 }
 
 async function apiFetch(
@@ -341,7 +349,49 @@ export default function Dashboard() {
                 (a, b) => (b[1] as number) - (a[1] as number)
               )}
             />
+            <BarTableCard
+              title="Browsers"
+              rows={(stats.browsers || []).map((b) => [b.name, b.count])}
+            />
+            <BarTableCard
+              title="Operating Systems"
+              rows={(stats.oses || []).map((o) => [o.name, o.count])}
+            />
+            <BarTableCard
+              title="Languages"
+              rows={(stats.languages || []).map((l) => [l.code, l.count])}
+            />
+            <BarTableCard
+              title="Entry Pages"
+              rows={(stats.entryPages || []).map((p) => [p.path, p.count])}
+            />
+            <BarTableCard
+              title="Exit Pages"
+              rows={(stats.exitPages || []).map((p) => [p.path, p.count])}
+            />
           </div>
+
+          {((stats.utmSources || []).length > 0 ||
+            (stats.utmMediums || []).length > 0 ||
+            (stats.utmCampaigns || []).length > 0) && (
+            <>
+              <h2 className="section-title">Campaigns</h2>
+              <div className="tables-grid">
+                <BarTableCard
+                  title="UTM Sources"
+                  rows={(stats.utmSources || []).map((s) => [s.name, s.count])}
+                />
+                <BarTableCard
+                  title="UTM Mediums"
+                  rows={(stats.utmMediums || []).map((m) => [m.name, m.count])}
+                />
+                <BarTableCard
+                  title="UTM Campaigns"
+                  rows={(stats.utmCampaigns || []).map((c) => [c.name, c.count])}
+                />
+              </div>
+            </>
+          )}
         </>
       )}
     </>
