@@ -304,17 +304,12 @@ class AnalyticsStack(Stack):
         s3deploy.BucketDeployment(
             self,
             "DeployDashboard",
-            sources=[dashboard_asset],
+            sources=[
+                dashboard_asset,
+                s3deploy.Source.asset(str(SRC / "tracker")),
+            ],
             destination_bucket=site_bucket,
             distribution=distribution,
-        )
-        s3deploy.BucketDeployment(
-            self,
-            "DeployTracker",
-            sources=[s3deploy.Source.asset(str(SRC / "tracker"))],
-            destination_bucket=site_bucket,
-            distribution=distribution,
-            prune=False,
         )
 
         # --- Route53 ---
