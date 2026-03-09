@@ -122,6 +122,12 @@ def _get_stats(params):
     referrers: Counter = Counter()
     countries: Counter = Counter()
     devices: Counter = Counter()
+    browsers: Counter = Counter()
+    oses: Counter = Counter()
+    languages: Counter = Counter()
+    utm_sources: Counter = Counter()
+    utm_mediums: Counter = Counter()
+    utm_campaigns: Counter = Counter()
     dates = []
 
     current = start_date
@@ -147,6 +153,18 @@ def _get_stats(params):
             countries[co] += int(c)
         for dv, c in (summary.get("devices") or {}).items():
             devices[dv] += int(c)
+        for br, c in (summary.get("browsers") or {}).items():
+            browsers[br] += int(c)
+        for o, c in (summary.get("oses") or {}).items():
+            oses[o] += int(c)
+        for lang, c in (summary.get("languages") or {}).items():
+            languages[lang] += int(c)
+        for src, c in (summary.get("utm_sources") or {}).items():
+            utm_sources[src] += int(c)
+        for med, c in (summary.get("utm_mediums") or {}).items():
+            utm_mediums[med] += int(c)
+        for cmp, c in (summary.get("utm_campaigns") or {}).items():
+            utm_campaigns[cmp] += int(c)
 
         dates.append({
             "date": d,
@@ -157,13 +175,22 @@ def _get_stats(params):
 
     # Session metrics
     total_sessions = max(len(all_session_ids), 1)
-    # Bounce rate not available from summaries alone (would need per-session page counts)
-    # Use session duration: sessions with 0 duration are likely bounces
     bounce_sessions = sum(1 for s in all_sessions if int(s.get("duration", 0)) == 0)
     bounce_rate = round(bounce_sessions / max(len(all_sessions), 1) * 100, 1) if all_sessions else 0
 
     total_duration = sum(int(s.get("duration", 0)) for s in all_sessions)
     avg_duration = round(total_duration / len(all_sessions)) if all_sessions else 0
+
+    # Entry/exit pages from session records
+    entry_pages: Counter = Counter()
+    exit_pages: Counter = Counter()
+    for s in all_sessions:
+        ep = s.get("entry_page")
+        xp = s.get("exit_page")
+        if ep:
+            entry_pages[ep] += 1
+        if xp:
+            exit_pages[xp] += 1
 
     return _resp(200, {
         "totalPageviews": total_pageviews,
@@ -176,6 +203,14 @@ def _get_stats(params):
         "topReferrers": [{"domain": r, "count": c} for r, c in referrers.most_common(20)],
         "countries": [{"code": co, "count": c} for co, c in countries.most_common(20)],
         "devices": dict(devices),
+        "browsers": [{"name": b, "count": c} for b, c in browsers.most_common(20)],
+        "oses": [{"name": o, "count": c} for o, c in oses.most_common(20)],
+        "languages": [{"code": lang, "count": c} for lang, c in languages.most_common(20)],
+        "utmSources": [{"name": s, "count": c} for s, c in utm_sources.most_common(20)],
+        "utmMediums": [{"name": m, "count": c} for m, c in utm_mediums.most_common(20)],
+        "utmCampaigns": [{"name": cp, "count": c} for cp, c in utm_campaigns.most_common(20)],
+        "entryPages": [{"path": p, "count": c} for p, c in entry_pages.most_common(20)],
+        "exitPages": [{"path": p, "count": c} for p, c in exit_pages.most_common(20)],
     })
 
 
