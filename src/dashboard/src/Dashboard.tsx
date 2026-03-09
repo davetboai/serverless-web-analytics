@@ -65,6 +65,18 @@ interface RecentEntry {
   browser: string;
   referrer: string;
 }
+interface GoalData {
+  id: string;
+  name: string;
+  type: string;
+  value: string;
+  completions: number;
+  conversionRate: number;
+}
+interface GoalsResponse {
+  goals: GoalData[];
+  totalVisitors: number;
+}
 
 async function apiFetch(
   path: string,
@@ -135,6 +147,11 @@ export default function Dashboard() {
   const [newSiteDomain, setNewSiteDomain] = useState("");
   const [eventsData, setEventsData] = useState<EventsData | null>(null);
   const [recentData, setRecentData] = useState<RecentEntry[]>([]);
+  const [goalsData, setGoalsData] = useState<GoalsResponse | null>(null);
+  const [showGoalForm, setShowGoalForm] = useState(false);
+  const [newGoalName, setNewGoalName] = useState("");
+  const [newGoalType, setNewGoalType] = useState<"page" | "event">("page");
+  const [newGoalValue, setNewGoalValue] = useState("");
   const [activeTab, setActiveTab] = useState<"overview" | "events" | "realtime">("overview");
 
   const refreshSites = () =>
@@ -177,11 +194,19 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, [siteId]);
 
+  const refreshGoals = () => {
+    if (!siteId) return;
+    apiFetch("/api/goals", { site_id: siteId, days })
+      .then((data) => setGoalsData(data))
+      .catch(() => {});
+  };
+
   useEffect(() => {
     if (!siteId || activeTab !== "events") return;
     apiFetch("/api/events", { site_id: siteId, days })
       .then((data) => setEventsData(data))
       .catch(() => {});
+    refreshGoals();
   }, [siteId, days, activeTab]);
 
   useEffect(() => {
@@ -488,6 +513,70 @@ export default function Dashboard() {
             </>
           ) : (
             <div className="empty">No event data yet. Track events with: window.sa.event("name", &#123;props&#125;)</div>
+          )}
+
+          <h2 className="section-title">Goals & Conversions</h2>
+          <button className="btn-export" onClick={() => setShowGoalForm(!showGoalForm)} style={{marginBottom: 12}}>
+            {showGoalForm ? "Cancel" : "Add Goal"}
+          </button>
+          {showGoalForm && (
+            <div className="manage-sites" style={{marginBottom: 16}}>
+              <div className="manage-add">
+                <input placeholder="Goal name" value={newGoalName} onChange={(e) => setNewGoalName(e.target.value)} />
+                <select value={newGoalType} onChange={(e) => setNewGoalType(e.target.value as "page" | "event")}
+                  style={{flex: "none", width: "auto"}}>
+                  <option value="page">Page visit</option>
+                  <option value="event">Custom event</option>
+                </select>
+                <input placeholder={newGoalType === "page" ? "/signup" : "signup"} value={newGoalValue}
+                  onChange={(e) => setNewGoalValue(e.target.value)} />
+                <button className="btn-export" onClick={() => {
+                  if (!newGoalName.trim() || !newGoalValue.trim()) return;
+                  apiFetch("/api/goals", {}, {
+                    method: "POST",
+                    body: { site_id: siteId, name: newGoalName.trim(), type: newGoalType, value: newGoalValue.trim() },
+                  }).then(() => {
+                    setNewGoalName(""); setNewGoalValue(""); setShowGoalForm(false);
+                    refreshGoals();
+                  }).catch((e) => setError(e.message));
+                }}>Create</button>
+              </div>
+            </div>
+          )}
+          {goalsData && goalsData.goals.length > 0 ? (
+            <div className="table-card">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Goal</th>
+                    <th>Type</th>
+                    <th>Completions</th>
+                    <th>Conv. Rate</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {goalsData.goals.map((g) => (
+                    <tr key={g.id}>
+                      <td>{g.name}</td>
+                      <td>{g.type === "page" ? "Page" : "Event"}: {g.value}</td>
+                      <td>{fmt(g.completions)}</td>
+                      <td style={{fontWeight: 600, color: "#22c55e"}}>{g.conversionRate}%</td>
+                      <td>
+                        <button className="btn-danger" onClick={() => {
+                          apiFetch("/api/goals", {}, {
+                            method: "DELETE",
+                            body: { site_id: siteId, id: g.id },
+                          }).then(() => refreshGoals()).catch((e) => setError(e.message));
+                        }}>Delete</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="empty">No goals defined yet</div>
           )}
         </div>
       )}
