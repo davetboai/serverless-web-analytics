@@ -5,3 +5,4 @@ cdk.out/
 node_modules/
 .env
 *.egg-info/
+src/dashboard/dist/
