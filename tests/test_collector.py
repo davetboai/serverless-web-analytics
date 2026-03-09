@@ -384,3 +384,71 @@ def test_path_strips_query_string(ddb_table):
     items = ddb_table.scan()["Items"]
     pageview = [i for i in items if i["pk"].startswith("test-site#")][0]
     assert pageview["path"] == "/search"
+
+
+def test_perf_event(ddb_table):
+    """Verify performance metrics are stored as PERF# records."""
+    collector = load_collector()
+
+    event = make_event({
+        "sid": "test-site",
+        "type": "perf",
+        "url": "/about",
+        "perf": {"dns": 5, "tcp": 10, "ttfb": 50, "load": 800, "dom": 600},
+        "ses": "s1",
+    })
+    result = collector.handler(event, None)
+    assert result["statusCode"] == 200
+
+    items = ddb_table.scan()["Items"]
+    perf_items = [i for i in items if i["pk"].startswith("PERF#")]
+    assert len(perf_items) == 1
+    p = perf_items[0]
+    assert p["path"] == "/about"
+    assert int(p["ttfb"]) == 50
+    assert int(p["load"]) == 800
+    assert int(p["dom"]) == 600
+
+
+def test_perf_event_clamps_values(ddb_table):
+    """Verify perf values are clamped to 60000ms max."""
+    collector = load_collector()
+
+    event = make_event({
+        "sid": "test-site",
+        "type": "perf",
+        "url": "/",
+        "perf": {"dns": 999999, "tcp": 0, "ttfb": 0, "load": 100000, "dom": 0},
+        "ses": "s1",
+    })
+    collector.handler(event, None)
+
+    items = ddb_table.scan()["Items"]
+    perf_items = [i for i in items if i["pk"].startswith("PERF#")]
+    assert int(perf_items[0]["dns"]) == 60000
+    assert int(perf_items[0]["load"]) == 60000
+
+
+def test_site_ttl_override(ddb_table):
+    """Verify site-specific TTL is used when configured."""
+    collector = load_collector()
+    # Clear the module-level cache
+    collector._site_ttl_cache.clear()
+
+    # Configure site with custom TTL
+    ddb_table.put_item(Item={"pk": "SITES", "sk": "ttl-site", "domain": "ttl.com", "ttl_days": 60})
+
+    event = make_event({
+        "sid": "ttl-site",
+        "url": "/",
+        "ses": "s1",
+    })
+    collector.handler(event, None)
+
+    items = ddb_table.scan()["Items"]
+    pageview = [i for i in items if i["pk"].startswith("ttl-site#")][0]
+    # TTL should be ~60 days from now, not the default 395
+    import time
+    expected_min = int(time.time()) + (86400 * 59)
+    expected_max = int(time.time()) + (86400 * 61)
+    assert expected_min <= int(pageview["ttl"]) <= expected_max

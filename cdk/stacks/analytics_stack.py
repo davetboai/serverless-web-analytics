@@ -151,6 +151,16 @@ class AnalyticsStack(Stack):
             ],
             integration=query_integration,
         )
+        api.add_routes(
+            path="/api/perf",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=query_integration,
+        )
+        api.add_routes(
+            path="/api/compare",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=query_integration,
+        )
 
         # --- S3 bucket for dashboard + tracker script ---
         site_bucket = s3.Bucket(
@@ -255,6 +265,20 @@ class AnalyticsStack(Stack):
                     cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
                     origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
                     allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
+                ),
+                "/api/perf": cloudfront.BehaviorOptions(
+                    origin=query_origin,
+                    viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                    cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
+                    origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                    allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+                ),
+                "/api/compare": cloudfront.BehaviorOptions(
+                    origin=query_origin,
+                    viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                    cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
+                    origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                    allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
                 ),
             },
             domain_names=[domain_name],
