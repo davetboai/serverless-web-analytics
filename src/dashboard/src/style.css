@@ -326,6 +326,31 @@ thead th {
 }
 .btn-danger:hover { background: #5b1d28; }
 
+.change-indicator {
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.manage-ttl {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.ttl-input {
+  background: #0f172a;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 12px;
+  width: 60px;
+  text-align: center;
+}
+
 @media (max-width: 640px) {
   #root { padding: 16px; }
   .stat-value { font-size: 22px; }

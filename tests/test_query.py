@@ -347,6 +347,127 @@ def test_create_and_get_goals(ddb_table):
     assert len(body["goals"]) == 1
 
 
+def test_get_perf(ddb_table):
+    """Verify /api/perf returns aggregated performance stats."""
+    query = load_query()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Insert perf records
+    for i, (load, ttfb, dom) in enumerate([(800, 50, 600), (1200, 80, 900), (600, 30, 400), (1000, 60, 700)]):
+        ddb_table.put_item(Item={
+            "pk": f"PERF#test-site#{today}",
+            "sk": f"2024-01-01T00:00:0{i}#abc{i}",
+            "path": "/" if i < 2 else "/about",
+            "dns": 5,
+            "tcp": 10,
+            "ttfb": ttfb,
+            "load": load,
+            "dom": dom,
+            "visitor": f"v{i}",
+            "ttl": 9999999999,
+        })
+
+    event = make_event({}, method="GET", path="/api/perf")
+    event["queryStringParameters"] = {"site_id": "test-site", "days": "1"}
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert body["sampleCount"] == 4
+    assert body["avgLoad"] == 900  # (800+1200+600+1000)/4
+    assert body["avgTtfb"] == 55   # (50+80+30+60)/4
+    assert len(body["byPage"]) == 2
+
+
+def test_get_perf_empty(ddb_table):
+    """Verify /api/perf returns zeros when no data."""
+    query = load_query()
+    event = make_event({}, method="GET", path="/api/perf")
+    event["queryStringParameters"] = {"site_id": "test-site", "days": "7"}
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert body["sampleCount"] == 0
+    assert body["avgLoad"] == 0
+
+
+def test_get_compare(ddb_table):
+    """Verify /api/compare returns current vs previous period."""
+    query = load_query()
+    today = datetime.now(timezone.utc)
+
+    # Current period: today (1 day)
+    current_date = today.strftime("%Y-%m-%d")
+    ddb_table.put_item(Item={
+        "pk": "SUMMARY#test-site",
+        "sk": current_date,
+        "pageviews": 100,
+        "visitors": {"v1", "v2", "v3"},
+        "sessions": {"v1#s1"},
+        "paths": {"/": 100},
+        "countries": {"US": 100},
+        "devices": {"desktop": 100},
+        "referrers": {},
+        "ttl": 9999999999,
+    })
+
+    # Previous period: yesterday
+    from datetime import timedelta
+    prev_date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    ddb_table.put_item(Item={
+        "pk": "SUMMARY#test-site",
+        "sk": prev_date,
+        "pageviews": 80,
+        "visitors": {"v1", "v4"},
+        "sessions": {"v1#s2"},
+        "paths": {"/": 80},
+        "countries": {"US": 80},
+        "devices": {"desktop": 80},
+        "referrers": {},
+        "ttl": 9999999999,
+    })
+
+    event = make_event({}, method="GET", path="/api/compare")
+    event["queryStringParameters"] = {"site_id": "test-site", "days": "1"}
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert body["current"]["pageviews"] == 100
+    assert body["previous"]["pageviews"] == 80
+    assert body["change"]["pageviews"] == 25.0  # (100-80)/80 * 100
+
+
+def test_rename_site_with_ttl(ddb_table):
+    """Verify PUT /api/sites can set TTL days."""
+    query = load_query()
+    ddb_table.put_item(Item={"pk": "SITES", "sk": "my-site", "domain": "old.com"})
+
+    event = make_event(
+        {"id": "my-site", "domain": "new.com", "ttl_days": 90},
+        method="PUT",
+        path="/api/sites",
+    )
+    result = query.handler(event, None)
+    assert result["statusCode"] == 200
+
+    item = ddb_table.get_item(Key={"pk": "SITES", "sk": "my-site"}).get("Item")
+    assert item["domain"] == "new.com"
+    assert int(item["ttl_days"]) == 90
+
+
+def test_list_sites_returns_ttl(ddb_table):
+    """Verify GET /api/sites returns ttl_days."""
+    query = load_query()
+    ddb_table.put_item(Item={"pk": "SITES", "sk": "my-site", "domain": "example.com", "ttl_days": 120})
+
+    event = make_event({}, method="GET", path="/api/sites")
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+    assert body["sites"][0]["ttl_days"] == 120
+
+
 def test_get_live_empty(ddb_table):
     query = load_query()
     event = make_event({}, method="GET", path="/api/live")
