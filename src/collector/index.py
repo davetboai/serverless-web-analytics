@@ -156,6 +156,29 @@ def handler(event, context):
         "ttl": live_ttl,
     })
 
+    # Look up site-specific TTL override
+    site_ttl_days = _get_site_ttl(site_id)
+    if site_ttl_days:
+        ttl = int(now.timestamp()) + (86400 * site_ttl_days)
+
+    if event_type == "perf":
+        # Page load performance metrics
+        perf = body.get("perf") or {}
+        perf_item = {
+            "pk": f"PERF#{site_id}#{date_str}",
+            "sk": f"{now.isoformat()}#{uuid.uuid4().hex[:8]}",
+            "path": (body.get("url") or "/").split("?")[0][:512],
+            "dns": min(int(perf.get("dns", 0) or 0), 60000),
+            "tcp": min(int(perf.get("tcp", 0) or 0), 60000),
+            "ttfb": min(int(perf.get("ttfb", 0) or 0), 60000),
+            "load": min(int(perf.get("load", 0) or 0), 60000),
+            "dom": min(int(perf.get("dom", 0) or 0), 60000),
+            "visitor": visitor_hash,
+            "ttl": ttl,
+        }
+        table.put_item(Item=perf_item)
+        return _resp(200, "ok")
+
     if event_type == "ping":
         # Update session duration — write a session heartbeat record
         duration = min(int(body.get("dur", 0) or 0), 86400)
@@ -389,6 +412,23 @@ def _update_session_pages(site_id, date_str, visitor_hash, session_id, path_val,
         )
     except Exception:
         pass
+
+
+_site_ttl_cache = {}
+
+
+def _get_site_ttl(site_id):
+    """Get configured TTL days for a site (cached per Lambda invocation)."""
+    if site_id in _site_ttl_cache:
+        return _site_ttl_cache[site_id]
+    try:
+        result = table.get_item(Key={"pk": "SITES", "sk": site_id})
+        item = result.get("Item", {})
+        ttl_days = int(item.get("ttl_days", 0) or 0)
+        _site_ttl_cache[site_id] = ttl_days if ttl_days > 0 else None
+    except Exception:
+        _site_ttl_cache[site_id] = None
+    return _site_ttl_cache[site_id]
 
 
 def _register_site(site_id):
