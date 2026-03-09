@@ -43,6 +43,40 @@
   // Track initial pageview
   send("pageview");
 
+  // Collect page load performance after load
+  window.addEventListener("load", function () {
+    setTimeout(function () {
+      try {
+        var nav = performance.getEntriesByType("navigation")[0];
+        if (nav) {
+          var perf = {
+            dns: Math.round(nav.domainLookupEnd - nav.domainLookupStart),
+            tcp: Math.round(nav.connectEnd - nav.connectStart),
+            ttfb: Math.round(nav.responseStart - nav.requestStart),
+            load: Math.round(nav.loadEventStart - nav.startTime),
+            dom: Math.round(nav.domContentLoadedEventEnd - nav.startTime),
+          };
+          var data = JSON.stringify({
+            sid: siteId,
+            type: "perf",
+            url: location.pathname,
+            perf: perf,
+            ses: sessionId,
+          });
+          var url = endpoint + "/api/collect";
+          if (navigator.sendBeacon) {
+            navigator.sendBeacon(url, data);
+          } else {
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", url, true);
+            xhr.setRequestHeader("Content-Type", "application/json");
+            xhr.send(data);
+          }
+        }
+      } catch (err) {}
+    }, 100);
+  });
+
   // Track SPA navigation
   var origPush = history.pushState;
   history.pushState = function () {

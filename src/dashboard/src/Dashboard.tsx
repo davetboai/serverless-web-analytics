@@ -25,6 +25,7 @@ ChartJS.register(
 interface SiteInfo {
   id: string;
   domain: string;
+  ttl_days?: number;
 }
 interface DateEntry {
   date: string;
@@ -77,6 +78,20 @@ interface GoalsResponse {
   goals: GoalData[];
   totalVisitors: number;
 }
+interface PerfData {
+  sampleCount: number;
+  avgLoad: number;
+  avgTtfb: number;
+  avgDom: number;
+  p75Load: number;
+  p75Ttfb: number;
+  byPage: { path: string; count: number; avgLoad: number }[];
+}
+interface CompareData {
+  current: { pageviews: number; visitors: number };
+  previous: { pageviews: number; visitors: number };
+  change: { pageviews: number; visitors: number };
+}
 
 async function apiFetch(
   path: string,
@@ -106,6 +121,19 @@ function fmtDuration(seconds: number) {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+function fmtMs(ms: number) {
+  if (!ms) return "0ms";
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${ms}ms`;
+}
+
+function ChangeIndicator({ value }: { value: number }) {
+  if (value === 0) return null;
+  const color = value > 0 ? "#22c55e" : "#ef4444";
+  const arrow = value > 0 ? "\u2191" : "\u2193";
+  return <div className="change-indicator" style={{ color }}>{arrow} {Math.abs(value)}%</div>;
 }
 
 function countryFlag(code: string) {
@@ -152,7 +180,9 @@ export default function Dashboard() {
   const [newGoalName, setNewGoalName] = useState("");
   const [newGoalType, setNewGoalType] = useState<"page" | "event">("page");
   const [newGoalValue, setNewGoalValue] = useState("");
-  const [activeTab, setActiveTab] = useState<"overview" | "events" | "realtime">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "events" | "realtime" | "performance">("overview");
+  const [perfData, setPerfData] = useState<PerfData | null>(null);
+  const [compareData, setCompareData] = useState<CompareData | null>(null);
 
   const refreshSites = () =>
     apiFetch("/api/sites")
@@ -207,6 +237,20 @@ export default function Dashboard() {
       .then((data) => setEventsData(data))
       .catch(() => {});
     refreshGoals();
+  }, [siteId, days, activeTab]);
+
+  useEffect(() => {
+    if (!siteId) return;
+    apiFetch("/api/compare", { site_id: siteId, days })
+      .then((data) => setCompareData(data))
+      .catch(() => setCompareData(null));
+  }, [siteId, days]);
+
+  useEffect(() => {
+    if (!siteId || activeTab !== "performance") return;
+    apiFetch("/api/perf", { site_id: siteId, days })
+      .then((data) => setPerfData(data))
+      .catch(() => {});
   }, [siteId, days, activeTab]);
 
   useEffect(() => {
@@ -327,6 +371,24 @@ export default function Dashboard() {
               <div key={s.id} className="manage-row">
                 <span className="manage-id">{s.id}</span>
                 <span className="manage-domain">{s.domain}</span>
+                <label className="manage-ttl" title="Data retention in days (30-730)">
+                  TTL
+                  <input
+                    type="number"
+                    min={30}
+                    max={730}
+                    defaultValue={s.ttl_days || 395}
+                    className="ttl-input"
+                    onBlur={(e) => {
+                      const val = parseInt(e.target.value, 10);
+                      if (isNaN(val)) return;
+                      apiFetch("/api/sites", {}, {
+                        method: "PUT",
+                        body: { id: s.id, domain: s.domain, ttl_days: val },
+                      }).then(() => refreshSites()).catch((err) => setError(err.message));
+                    }}
+                  />d
+                </label>
                 <button
                   className="btn-danger"
                   onClick={() => {
@@ -358,13 +420,13 @@ export default function Dashboard() {
       )}
 
       <div className="tabs">
-        {(["overview", "events", "realtime"] as const).map((tab) => (
+        {(["overview", "events", "performance", "realtime"] as const).map((tab) => (
           <button
             key={tab}
             className={`tab ${activeTab === tab ? "tab-active" : ""}`}
             onClick={() => setActiveTab(tab)}
           >
-            {tab === "overview" ? "Overview" : tab === "events" ? "Events" : "Real-time"}
+            {tab === "overview" ? "Overview" : tab === "events" ? "Events" : tab === "performance" ? "Performance" : "Real-time"}
           </button>
         ))}
       </div>
@@ -375,10 +437,12 @@ export default function Dashboard() {
             <div className="stat-card">
               <div className="stat-label">Pageviews</div>
               <div className="stat-value">{fmt(stats.totalPageviews)}</div>
+              {compareData && <ChangeIndicator value={compareData.change.pageviews} />}
             </div>
             <div className="stat-card">
               <div className="stat-label">Unique Visitors</div>
               <div className="stat-value">{fmt(stats.totalVisitors)}</div>
+              {compareData && <ChangeIndicator value={compareData.change.visitors} />}
             </div>
             <div className="stat-card">
               <div className="stat-label">Bounce Rate</div>
@@ -577,6 +641,68 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="empty">No goals defined yet</div>
+          )}
+        </div>
+      )}
+
+      {activeTab === "performance" && (
+        <div className="perf-panel">
+          {perfData && perfData.sampleCount > 0 ? (
+            <>
+              <div className="stats-grid">
+                <div className="stat-card">
+                  <div className="stat-label">Avg Load Time</div>
+                  <div className="stat-value">{fmtMs(perfData.avgLoad)}</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-label">Avg TTFB</div>
+                  <div className="stat-value">{fmtMs(perfData.avgTtfb)}</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-label">Avg DOM Ready</div>
+                  <div className="stat-value">{fmtMs(perfData.avgDom)}</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-label">P75 Load</div>
+                  <div className="stat-value">{fmtMs(perfData.p75Load)}</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-label">P75 TTFB</div>
+                  <div className="stat-value">{fmtMs(perfData.p75Ttfb)}</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-label">Samples</div>
+                  <div className="stat-value">{fmt(perfData.sampleCount)}</div>
+                </div>
+              </div>
+              {perfData.byPage.length > 0 && (
+                <div className="tables-grid">
+                  <div className="table-card">
+                    <h3>Load Time by Page</h3>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Page</th>
+                          <th>Samples</th>
+                          <th>Avg Load</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {perfData.byPage.map((p, i) => (
+                          <tr key={i}>
+                            <td>{p.path}</td>
+                            <td>{p.count}</td>
+                            <td>{fmtMs(p.avgLoad)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="empty">No performance data yet. The tracker automatically collects page load timing.</div>
           )}
         </div>
       )}

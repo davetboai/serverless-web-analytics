@@ -62,12 +62,22 @@ def handler(event, context):
             return _delete_goal(body)
         return _get_goals(params)
 
+    if path.endswith("/perf"):
+        return _get_perf(params)
+
+    if path.endswith("/compare"):
+        return _get_compare(params)
+
     return _get_stats(params)
 
 
 def _list_sites():
     result = table.query(KeyConditionExpression=Key("pk").eq("SITES"))
-    sites = [{"id": item["sk"], "domain": item.get("domain", "")} for item in result.get("Items", [])]
+    sites = [{
+        "id": item["sk"],
+        "domain": item.get("domain", ""),
+        "ttl_days": int(item.get("ttl_days", 395)),
+    } for item in result.get("Items", [])]
     return _resp(200, {"sites": sites})
 
 
@@ -88,11 +98,20 @@ def _rename_site(body):
     domain = (body.get("domain") or "").strip()
     if not site_id or not domain:
         return _resp(400, {"error": "id and domain required"})
+    ttl_days = body.get("ttl_days")
+    update_expr = "SET #d = :d"
+    names = {"#d": "domain"}
+    values = {":d": domain[:256]}
+    if ttl_days is not None:
+        ttl_val = max(30, min(int(ttl_days), 730))  # 1 month to 2 years
+        update_expr += ", #ttl_days = :ttl_days"
+        names["#ttl_days"] = "ttl_days"
+        values[":ttl_days"] = ttl_val
     table.update_item(
         Key={"pk": "SITES", "sk": site_id},
-        UpdateExpression="SET #d = :d",
-        ExpressionAttributeNames={"#d": "domain"},
-        ExpressionAttributeValues={":d": domain[:256]},
+        UpdateExpression=update_expr,
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues=values,
     )
     return _resp(200, {"id": site_id, "domain": domain})
 
@@ -404,6 +423,125 @@ def _get_goals(params):
         })
 
     return _resp(200, {"goals": goals, "totalVisitors": total_visitors})
+
+
+def _get_perf(params):
+    """Return page load performance stats."""
+    site_id = params.get("site_id", "")
+    if not site_id:
+        return _resp(400, {"error": "missing site_id"})
+
+    days = min(int(params.get("days", 7)), 90)
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=days - 1)
+
+    all_perf = []
+    current = start_date
+    while current <= end_date:
+        date_str = current.strftime("%Y-%m-%d")
+        items = _query_all(f"PERF#{site_id}#{date_str}")
+        all_perf.extend(items)
+        current += timedelta(days=1)
+
+    if not all_perf:
+        return _resp(200, {
+            "sampleCount": 0,
+            "avgLoad": 0, "avgTtfb": 0, "avgDom": 0,
+            "p75Load": 0, "p75Ttfb": 0,
+            "byPage": [],
+        })
+
+    loads = sorted(int(p.get("load", 0)) for p in all_perf)
+    ttfbs = sorted(int(p.get("ttfb", 0)) for p in all_perf)
+    doms = [int(p.get("dom", 0)) for p in all_perf]
+    n = len(all_perf)
+
+    # Per-page averages
+    page_loads: dict = {}
+    page_counts: Counter = Counter()
+    for p in all_perf:
+        path = p.get("path", "/")
+        page_counts[path] += 1
+        page_loads.setdefault(path, []).append(int(p.get("load", 0)))
+
+    by_page = []
+    for path, count in page_counts.most_common(20):
+        vals = page_loads[path]
+        by_page.append({
+            "path": path,
+            "count": count,
+            "avgLoad": round(sum(vals) / len(vals)),
+        })
+
+    return _resp(200, {
+        "sampleCount": n,
+        "avgLoad": round(sum(loads) / n),
+        "avgTtfb": round(sum(ttfbs) / n),
+        "avgDom": round(sum(doms) / n),
+        "p75Load": loads[int(n * 0.75)] if n > 0 else 0,
+        "p75Ttfb": ttfbs[int(n * 0.75)] if n > 0 else 0,
+        "byPage": by_page,
+    })
+
+
+def _aggregate_period(site_id, start_date, end_date):
+    """Aggregate summary data for a date range. Returns (pageviews, visitors_count)."""
+    summaries = table.query(
+        KeyConditionExpression=(
+            Key("pk").eq(f"SUMMARY#{site_id}")
+            & Key("sk").between(start_date.isoformat(), end_date.isoformat())
+        ),
+    ).get("Items", [])
+
+    total_pageviews = 0
+    all_visitors: set = set()
+    for s in summaries:
+        total_pageviews += int(s.get("pageviews", 0))
+        visitors = s.get("visitors", set())
+        if isinstance(visitors, set):
+            all_visitors.update(visitors)
+
+    return total_pageviews, len(all_visitors)
+
+
+def _get_compare(params):
+    """Compare current period vs previous period of same length."""
+    site_id = params.get("site_id", "")
+    if not site_id:
+        return _resp(400, {"error": "missing site_id"})
+
+    days = min(int(params.get("days", 7)), 90)
+    end_date = datetime.now(timezone.utc).date()
+    current_start = end_date - timedelta(days=days - 1)
+    prev_end = current_start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=days - 1)
+
+    curr_views, curr_visitors = _aggregate_period(site_id, current_start, end_date)
+    prev_views, prev_visitors = _aggregate_period(site_id, prev_start, prev_end)
+
+    def pct_change(curr, prev):
+        if prev == 0:
+            return 100.0 if curr > 0 else 0.0
+        return round((curr - prev) / prev * 100, 1)
+
+    return _resp(200, {
+        "current": {
+            "start": current_start.isoformat(),
+            "end": end_date.isoformat(),
+            "pageviews": curr_views,
+            "visitors": curr_visitors,
+        },
+        "previous": {
+            "start": prev_start.isoformat(),
+            "end": prev_end.isoformat(),
+            "pageviews": prev_views,
+            "visitors": prev_visitors,
+        },
+        "change": {
+            "pageviews": pct_change(curr_views, prev_views),
+            "visitors": pct_change(curr_visitors, prev_visitors),
+        },
+    })
 
 
 def _get_live(params):
