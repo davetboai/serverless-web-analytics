@@ -55,6 +55,44 @@
     send("pageview");
   });
 
+  // Custom event API: window.sa.event("signup", {plan: "pro"})
+  function trackEvent(name, props) {
+    var data = JSON.stringify({
+      sid: siteId,
+      type: "event",
+      name: name,
+      props: props || {},
+      url: location.pathname + location.search,
+      ses: sessionId,
+    });
+    var url = endpoint + "/api/collect";
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon(url, data);
+    } else {
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", url, true);
+      xhr.setRequestHeader("Content-Type", "application/json");
+      xhr.send(data);
+    }
+  }
+
+  // Expose API on window
+  window.sa = window.sa || {};
+  window.sa.event = trackEvent;
+
+  // Auto-track outbound link clicks
+  document.addEventListener("click", function (e) {
+    var link = e.target;
+    while (link && link.tagName !== "A") link = link.parentElement;
+    if (!link || !link.href) return;
+    try {
+      var u = new URL(link.href);
+      if (u.hostname !== location.hostname) {
+        trackEvent("outbound", { url: u.hostname + u.pathname });
+      }
+    } catch (err) {}
+  });
+
   // Heartbeat ping every 30s while page is visible
   var pingInterval = null;
   function startPing() {

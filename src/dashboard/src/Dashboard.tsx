@@ -50,6 +50,32 @@ interface StatsData {
   utmCampaigns: { name: string; count: number }[];
   entryPages: { path: string; count: number }[];
   exitPages: { path: string; count: number }[];
+  channels: { name: string; count: number }[];
+}
+interface EventsData {
+  totalEvents: number;
+  uniqueVisitors: number;
+  events: { name: string; count: number }[];
+}
+interface RecentEntry {
+  time: string;
+  path: string;
+  country: string;
+  device: string;
+  browser: string;
+  referrer: string;
+}
+interface GoalData {
+  id: string;
+  name: string;
+  type: string;
+  value: string;
+  completions: number;
+  conversionRate: number;
+}
+interface GoalsResponse {
+  goals: GoalData[];
+  totalVisitors: number;
 }
 
 async function apiFetch(
@@ -90,19 +116,22 @@ function countryFlag(code: string) {
   return String.fromCodePoint(a, b) + " ";
 }
 
-function exportCsv(stats: StatsData) {
-  const rows = [
-    ["Date", "Pageviews", "Visitors"],
-    ...stats.dates.map((d) => [d.date, d.pageviews, d.visitors]),
-  ];
+function downloadCsv(rows: (string | number)[][], filename: string) {
   const csv = rows.map((r) => r.join(",")).join("\n");
   const blob = new Blob([csv], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "analytics.csv";
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+function exportCsv(stats: StatsData) {
+  downloadCsv(
+    [["Date", "Pageviews", "Visitors"], ...stats.dates.map((d) => [d.date, d.pageviews, d.visitors])],
+    "analytics.csv"
+  );
 }
 
 export default function Dashboard() {
@@ -116,6 +145,14 @@ export default function Dashboard() {
   const [showManage, setShowManage] = useState(false);
   const [newSiteId, setNewSiteId] = useState("");
   const [newSiteDomain, setNewSiteDomain] = useState("");
+  const [eventsData, setEventsData] = useState<EventsData | null>(null);
+  const [recentData, setRecentData] = useState<RecentEntry[]>([]);
+  const [goalsData, setGoalsData] = useState<GoalsResponse | null>(null);
+  const [showGoalForm, setShowGoalForm] = useState(false);
+  const [newGoalName, setNewGoalName] = useState("");
+  const [newGoalType, setNewGoalType] = useState<"page" | "event">("page");
+  const [newGoalValue, setNewGoalValue] = useState("");
+  const [activeTab, setActiveTab] = useState<"overview" | "events" | "realtime">("overview");
 
   const refreshSites = () =>
     apiFetch("/api/sites")
@@ -156,6 +193,32 @@ export default function Dashboard() {
     const interval = setInterval(fetchLive, 30000);
     return () => clearInterval(interval);
   }, [siteId]);
+
+  const refreshGoals = () => {
+    if (!siteId) return;
+    apiFetch("/api/goals", { site_id: siteId, days })
+      .then((data) => setGoalsData(data))
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    if (!siteId || activeTab !== "events") return;
+    apiFetch("/api/events", { site_id: siteId, days })
+      .then((data) => setEventsData(data))
+      .catch(() => {});
+    refreshGoals();
+  }, [siteId, days, activeTab]);
+
+  useEffect(() => {
+    if (!siteId || activeTab !== "realtime") return;
+    const fetchRecent = () =>
+      apiFetch("/api/recent", { site_id: siteId })
+        .then((data) => setRecentData(data.recent || []))
+        .catch(() => {});
+    fetchRecent();
+    const interval = setInterval(fetchRecent, 10000);
+    return () => clearInterval(interval);
+  }, [siteId, activeTab]);
 
   const chartData = stats
     ? {
@@ -288,14 +351,26 @@ export default function Dashboard() {
       {error && <div className="error">{error}</div>}
       {loading && <div className="loading">Loading...</div>}
 
-      {stats && (
-        <>
-          {liveCount !== null && (
-            <div className="live-indicator">
-              <span className="live-dot" /> {fmt(liveCount)} currently online
-            </div>
-          )}
+      {liveCount !== null && (
+        <div className="live-indicator">
+          <span className="live-dot" /> {fmt(liveCount)} currently online
+        </div>
+      )}
 
+      <div className="tabs">
+        {(["overview", "events", "realtime"] as const).map((tab) => (
+          <button
+            key={tab}
+            className={`tab ${activeTab === tab ? "tab-active" : ""}`}
+            onClick={() => setActiveTab(tab)}
+          >
+            {tab === "overview" ? "Overview" : tab === "events" ? "Events" : "Real-time"}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === "overview" && stats && (
+        <>
           <div className="stats-grid">
             <div className="stat-card">
               <div className="stat-label">Pageviews</div>
@@ -331,10 +406,26 @@ export default function Dashboard() {
             <BarTableCard
               title="Top Pages"
               rows={stats.topPages.map((p) => [p.path, p.count])}
+              onExport={() => downloadCsv(
+                [["Path", "Count"], ...stats.topPages.map((p) => [p.path, p.count])],
+                "top-pages.csv"
+              )}
             />
             <BarTableCard
               title="Referrers"
               rows={stats.topReferrers.map((r) => [r.domain, r.count])}
+              onExport={() => downloadCsv(
+                [["Referrer", "Count"], ...stats.topReferrers.map((r) => [r.domain, r.count])],
+                "referrers.csv"
+              )}
+            />
+            <BarTableCard
+              title="Channels"
+              rows={(stats.channels || []).map((c) => [c.name, c.count])}
+              onExport={() => downloadCsv(
+                [["Channel", "Count"], ...(stats.channels || []).map((c) => [c.name, c.count])],
+                "channels.csv"
+              )}
             />
             <BarTableCard
               title="Countries"
@@ -394,6 +485,135 @@ export default function Dashboard() {
           )}
         </>
       )}
+
+      {activeTab === "events" && (
+        <div className="events-panel">
+          {eventsData ? (
+            <>
+              <div className="stats-grid">
+                <div className="stat-card">
+                  <div className="stat-label">Total Events</div>
+                  <div className="stat-value">{fmt(eventsData.totalEvents)}</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-label">Unique Visitors</div>
+                  <div className="stat-value">{fmt(eventsData.uniqueVisitors)}</div>
+                </div>
+              </div>
+              <div className="tables-grid">
+                <BarTableCard
+                  title="Custom Events"
+                  rows={eventsData.events.map((e) => [e.name, e.count])}
+                  onExport={() => downloadCsv(
+                    [["Event", "Count"], ...eventsData.events.map((e) => [e.name, e.count])],
+                    "events.csv"
+                  )}
+                />
+              </div>
+            </>
+          ) : (
+            <div className="empty">No event data yet. Track events with: window.sa.event("name", &#123;props&#125;)</div>
+          )}
+
+          <h2 className="section-title">Goals & Conversions</h2>
+          <button className="btn-export" onClick={() => setShowGoalForm(!showGoalForm)} style={{marginBottom: 12}}>
+            {showGoalForm ? "Cancel" : "Add Goal"}
+          </button>
+          {showGoalForm && (
+            <div className="manage-sites" style={{marginBottom: 16}}>
+              <div className="manage-add">
+                <input placeholder="Goal name" value={newGoalName} onChange={(e) => setNewGoalName(e.target.value)} />
+                <select value={newGoalType} onChange={(e) => setNewGoalType(e.target.value as "page" | "event")}
+                  style={{flex: "none", width: "auto"}}>
+                  <option value="page">Page visit</option>
+                  <option value="event">Custom event</option>
+                </select>
+                <input placeholder={newGoalType === "page" ? "/signup" : "signup"} value={newGoalValue}
+                  onChange={(e) => setNewGoalValue(e.target.value)} />
+                <button className="btn-export" onClick={() => {
+                  if (!newGoalName.trim() || !newGoalValue.trim()) return;
+                  apiFetch("/api/goals", {}, {
+                    method: "POST",
+                    body: { site_id: siteId, name: newGoalName.trim(), type: newGoalType, value: newGoalValue.trim() },
+                  }).then(() => {
+                    setNewGoalName(""); setNewGoalValue(""); setShowGoalForm(false);
+                    refreshGoals();
+                  }).catch((e) => setError(e.message));
+                }}>Create</button>
+              </div>
+            </div>
+          )}
+          {goalsData && goalsData.goals.length > 0 ? (
+            <div className="table-card">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Goal</th>
+                    <th>Type</th>
+                    <th>Completions</th>
+                    <th>Conv. Rate</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {goalsData.goals.map((g) => (
+                    <tr key={g.id}>
+                      <td>{g.name}</td>
+                      <td>{g.type === "page" ? "Page" : "Event"}: {g.value}</td>
+                      <td>{fmt(g.completions)}</td>
+                      <td style={{fontWeight: 600, color: "#22c55e"}}>{g.conversionRate}%</td>
+                      <td>
+                        <button className="btn-danger" onClick={() => {
+                          apiFetch("/api/goals", {}, {
+                            method: "DELETE",
+                            body: { site_id: siteId, id: g.id },
+                          }).then(() => refreshGoals()).catch((e) => setError(e.message));
+                        }}>Delete</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="empty">No goals defined yet</div>
+          )}
+        </div>
+      )}
+
+      {activeTab === "realtime" && (
+        <div className="realtime-panel">
+          <h2 className="section-title">Last 30 Minutes</h2>
+          {recentData.length === 0 ? (
+            <div className="empty">No recent pageviews</div>
+          ) : (
+            <div className="table-card">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Page</th>
+                    <th>Country</th>
+                    <th>Browser</th>
+                    <th>Referrer</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentData.map((r, i) => (
+                    <tr key={i}>
+                      <td className="nowrap">{r.time.split("T")[1]?.split(".")[0] || r.time}</td>
+                      <td>{r.path}</td>
+                      <td>{countryFlag(r.country)}{r.country}</td>
+                      <td>{r.browser}</td>
+                      <td>{r.referrer || "Direct"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </>
   );
 }
@@ -401,14 +621,21 @@ export default function Dashboard() {
 function BarTableCard({
   title,
   rows,
+  onExport,
 }: {
   title: string;
   rows: [string, number][];
+  onExport?: () => void;
 }) {
   const max = rows.length > 0 ? Math.max(...rows.map(([, c]) => c)) : 1;
   return (
     <div className="table-card">
-      <h3>{title}</h3>
+      <div className="table-card-header">
+        <h3>{title}</h3>
+        {onExport && rows.length > 0 && (
+          <button className="btn-table-export" onClick={onExport} title="Export CSV">CSV</button>
+        )}
+      </div>
       {rows.length === 0 ? (
         <div className="empty">No data</div>
       ) : (

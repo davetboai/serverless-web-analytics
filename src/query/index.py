@@ -44,6 +44,24 @@ def handler(event, context):
     if path.endswith("/live"):
         return _get_live(params)
 
+    if path.endswith("/events"):
+        return _get_events(params)
+
+    if path.endswith("/recent"):
+        return _get_recent(params)
+
+    if path.endswith("/goals"):
+        body = {}
+        try:
+            body = json.loads(event.get("body", "{}") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        if method == "POST":
+            return _create_goal(body)
+        if method == "DELETE":
+            return _delete_goal(body)
+        return _get_goals(params)
+
     return _get_stats(params)
 
 
@@ -128,6 +146,7 @@ def _get_stats(params):
     utm_sources: Counter = Counter()
     utm_mediums: Counter = Counter()
     utm_campaigns: Counter = Counter()
+    channels: Counter = Counter()
     dates = []
 
     current = start_date
@@ -165,6 +184,8 @@ def _get_stats(params):
             utm_mediums[med] += int(c)
         for cmp, c in (summary.get("utm_campaigns") or {}).items():
             utm_campaigns[cmp] += int(c)
+        for ch, c in (summary.get("channels") or {}).items():
+            channels[ch] += int(c)
 
         dates.append({
             "date": d,
@@ -211,7 +232,178 @@ def _get_stats(params):
         "utmCampaigns": [{"name": cp, "count": c} for cp, c in utm_campaigns.most_common(20)],
         "entryPages": [{"path": p, "count": c} for p, c in entry_pages.most_common(20)],
         "exitPages": [{"path": p, "count": c} for p, c in exit_pages.most_common(20)],
+        "channels": [{"name": ch, "count": c} for ch, c in channels.most_common(20)],
     })
+
+
+def _get_events(params):
+    """Return custom event stats for a site over a date range."""
+    site_id = params.get("site_id", "")
+    if not site_id:
+        return _resp(400, {"error": "missing site_id"})
+
+    days = min(int(params.get("days", 7)), 90)
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=days - 1)
+
+    event_summaries = table.query(
+        KeyConditionExpression=(
+            Key("pk").eq(f"EVENTS#{site_id}")
+            & Key("sk").between(start_date.isoformat(), end_date.isoformat())
+        ),
+    ).get("Items", [])
+
+    events: Counter = Counter()
+    total = 0
+    all_visitors: set = set()
+    for s in event_summaries:
+        total += int(s.get("total_events", 0))
+        visitors = s.get("event_visitors", set())
+        if isinstance(visitors, set):
+            all_visitors.update(visitors)
+        for name, count in (s.get("events") or {}).items():
+            events[name] += int(count)
+
+    return _resp(200, {
+        "totalEvents": total,
+        "uniqueVisitors": len(all_visitors),
+        "events": [{"name": n, "count": c} for n, c in events.most_common(50)],
+    })
+
+
+def _get_recent(params):
+    """Return recent pageviews (last ~30 min) for real-time feed."""
+    site_id = params.get("site_id", "")
+    if not site_id:
+        return _resp(400, {"error": "missing site_id"})
+
+    now = datetime.now(timezone.utc)
+    date_str = now.strftime("%Y-%m-%d")
+    cutoff = (now - timedelta(minutes=30)).isoformat()
+
+    items = table.query(
+        KeyConditionExpression=(
+            Key("pk").eq(f"{site_id}#{date_str}")
+            & Key("sk").gte(cutoff)
+        ),
+        ScanIndexForward=False,
+        Limit=50,
+    ).get("Items", [])
+
+    recent = []
+    for item in items:
+        recent.append({
+            "time": item["sk"].split("#")[0],
+            "path": item.get("path", ""),
+            "country": item.get("country", ""),
+            "device": item.get("device", ""),
+            "browser": item.get("browser", ""),
+            "referrer": item.get("referrer", ""),
+        })
+
+    return _resp(200, {"recent": recent})
+
+
+def _create_goal(body):
+    """Create a goal. Types: 'page' (path match) or 'event' (event name match)."""
+    site_id = (body.get("site_id") or "").strip()
+    goal_name = (body.get("name") or "").strip()
+    goal_type = (body.get("type") or "").strip()  # "page" or "event"
+    goal_value = (body.get("value") or "").strip()  # path or event name
+    if not site_id or not goal_name or goal_type not in ("page", "event") or not goal_value:
+        return _resp(400, {"error": "site_id, name, type (page|event), and value required"})
+    goal_id = goal_name.lower().replace(" ", "-")[:32]
+    table.put_item(Item={
+        "pk": f"GOALS#{site_id}",
+        "sk": goal_id,
+        "name": goal_name,
+        "goal_type": goal_type,
+        "value": goal_value,
+    })
+    return _resp(201, {"id": goal_id, "name": goal_name, "type": goal_type, "value": goal_value})
+
+
+def _delete_goal(body):
+    site_id = (body.get("site_id") or "").strip()
+    goal_id = (body.get("id") or "").strip()
+    if not site_id or not goal_id:
+        return _resp(400, {"error": "site_id and id required"})
+    table.delete_item(Key={"pk": f"GOALS#{site_id}", "sk": goal_id})
+    return _resp(200, {"deleted": goal_id})
+
+
+def _get_goals(params):
+    """List goals with conversion data for the date range."""
+    site_id = params.get("site_id", "")
+    if not site_id:
+        return _resp(400, {"error": "missing site_id"})
+
+    days = min(int(params.get("days", 7)), 90)
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=days - 1)
+
+    # Fetch goal definitions
+    goal_items = _query_all(f"GOALS#{site_id}")
+    if not goal_items:
+        return _resp(200, {"goals": []})
+
+    # Fetch summaries for visitor count and path data
+    summaries = table.query(
+        KeyConditionExpression=(
+            Key("pk").eq(f"SUMMARY#{site_id}")
+            & Key("sk").between(start_date.isoformat(), end_date.isoformat())
+        ),
+    ).get("Items", [])
+
+    all_visitors: set = set()
+    path_counts: Counter = Counter()
+    for s in summaries:
+        visitors = s.get("visitors", set())
+        if isinstance(visitors, set):
+            all_visitors.update(visitors)
+        for p, c in (s.get("paths") or {}).items():
+            path_counts[p] += int(c)
+
+    total_visitors = max(len(all_visitors), 1)
+
+    # Fetch event summaries for event goals
+    event_summaries = table.query(
+        KeyConditionExpression=(
+            Key("pk").eq(f"EVENTS#{site_id}")
+            & Key("sk").between(start_date.isoformat(), end_date.isoformat())
+        ),
+    ).get("Items", [])
+
+    event_counts: Counter = Counter()
+    for es in event_summaries:
+        for name, count in (es.get("events") or {}).items():
+            event_counts[name] += int(count)
+
+    # Compute conversions per goal
+    goals = []
+    for g in goal_items:
+        goal_type = g.get("goal_type", "")
+        value = g.get("value", "")
+        completions = 0
+        if goal_type == "page":
+            # Match paths that equal or start with the goal value
+            for p, c in path_counts.items():
+                if p == value or p.startswith(value.rstrip("/") + "/"):
+                    completions += c
+        elif goal_type == "event":
+            completions = event_counts.get(value, 0)
+
+        conv_rate = round(completions / total_visitors * 100, 1) if total_visitors > 0 else 0
+        goals.append({
+            "id": g["sk"],
+            "name": g.get("name", g["sk"]),
+            "type": goal_type,
+            "value": value,
+            "completions": completions,
+            "conversionRate": conv_rate,
+        })
+
+    return _resp(200, {"goals": goals, "totalVisitors": total_visitors})
 
 
 def _get_live(params):

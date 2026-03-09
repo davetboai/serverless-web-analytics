@@ -173,6 +173,180 @@ def test_get_stats_with_new_fields(ddb_table):
     assert body["exitPages"][0]["path"] == "/pricing"
 
 
+def test_get_stats_channels(ddb_table):
+    """Verify channels are returned in stats."""
+    query = load_query()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    ddb_table.put_item(Item={
+        "pk": "SUMMARY#test-site",
+        "sk": today,
+        "pageviews": 10,
+        "visitors": {"v1"},
+        "sessions": {"v1#s1"},
+        "paths": {"/": 10},
+        "countries": {"US": 10},
+        "devices": {"desktop": 10},
+        "referrers": {},
+        "browsers": {},
+        "oses": {},
+        "languages": {},
+        "channels": {"Search": 5, "Direct": 3, "Social": 2},
+        "ttl": 9999999999,
+    })
+
+    event = make_event({}, method="GET", path="/api/query")
+    event["queryStringParameters"] = {"site_id": "test-site", "days": "1"}
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+
+    assert len(body["channels"]) == 3
+    assert body["channels"][0]["name"] == "Search"
+
+
+def test_get_events(ddb_table):
+    """Verify /api/events returns custom event data."""
+    query = load_query()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    ddb_table.put_item(Item={
+        "pk": f"EVENTS#test-site",
+        "sk": today,
+        "total_events": 15,
+        "event_visitors": {"v1", "v2"},
+        "events": {"signup": 10, "purchase": 5},
+        "ttl": 9999999999,
+    })
+
+    event = make_event({}, method="GET", path="/api/events")
+    event["queryStringParameters"] = {"site_id": "test-site", "days": "1"}
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert body["totalEvents"] == 15
+    assert body["uniqueVisitors"] == 2
+    assert len(body["events"]) == 2
+    assert body["events"][0]["name"] == "signup"
+    assert body["events"][0]["count"] == 10
+
+
+def test_get_recent(ddb_table):
+    """Verify /api/recent returns recent pageviews."""
+    query = load_query()
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+
+    # Insert a recent pageview
+    ddb_table.put_item(Item={
+        "pk": f"test-site#{today}",
+        "sk": f"{now.isoformat()}#abc12345",
+        "path": "/hello",
+        "country": "US",
+        "device": "desktop",
+        "browser": "Chrome",
+        "referrer": "google.com",
+        "visitor": "v1",
+        "session": "s1",
+        "ttl": 9999999999,
+    })
+
+    event = make_event({}, method="GET", path="/api/recent")
+    event["queryStringParameters"] = {"site_id": "test-site"}
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert len(body["recent"]) == 1
+    assert body["recent"][0]["path"] == "/hello"
+    assert body["recent"][0]["browser"] == "Chrome"
+
+
+def test_create_and_get_goals(ddb_table):
+    """Verify goal CRUD and conversion rate computation."""
+    query = load_query()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Create a page goal
+    event = make_event(
+        {"site_id": "test-site", "name": "Signup Page", "type": "page", "value": "/signup"},
+        method="POST",
+        path="/api/goals",
+    )
+    result = query.handler(event, None)
+    assert result["statusCode"] == 201
+    body = json.loads(result["body"])
+    assert body["name"] == "Signup Page"
+
+    # Create an event goal
+    event = make_event(
+        {"site_id": "test-site", "name": "Purchase", "type": "event", "value": "purchase"},
+        method="POST",
+        path="/api/goals",
+    )
+    result = query.handler(event, None)
+    assert result["statusCode"] == 201
+
+    # Add summary data with matching paths
+    ddb_table.put_item(Item={
+        "pk": "SUMMARY#test-site",
+        "sk": today,
+        "pageviews": 100,
+        "visitors": {"v1", "v2", "v3", "v4", "v5"},
+        "paths": {"/": 50, "/signup": 20, "/about": 30},
+        "countries": {"US": 100},
+        "devices": {"desktop": 100},
+        "referrers": {},
+        "ttl": 9999999999,
+    })
+
+    # Add event summary data
+    ddb_table.put_item(Item={
+        "pk": "EVENTS#test-site",
+        "sk": today,
+        "total_events": 8,
+        "event_visitors": {"v1", "v2"},
+        "events": {"purchase": 3, "signup": 5},
+        "ttl": 9999999999,
+    })
+
+    # Get goals
+    event = make_event({}, method="GET", path="/api/goals")
+    event["queryStringParameters"] = {"site_id": "test-site", "days": "1"}
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert len(body["goals"]) == 2
+    assert body["totalVisitors"] == 5
+
+    # Find the page goal
+    page_goal = next(g for g in body["goals"] if g["type"] == "page")
+    assert page_goal["completions"] == 20  # /signup had 20 views
+    assert page_goal["conversionRate"] == 400.0  # 20/5 * 100
+
+    # Find the event goal
+    event_goal = next(g for g in body["goals"] if g["type"] == "event")
+    assert event_goal["completions"] == 3
+    assert event_goal["conversionRate"] == 60.0  # 3/5 * 100
+
+    # Delete a goal
+    event = make_event(
+        {"site_id": "test-site", "id": "signup-page"},
+        method="DELETE",
+        path="/api/goals",
+    )
+    result = query.handler(event, None)
+    assert result["statusCode"] == 200
+
+    # Verify deletion
+    event = make_event({}, method="GET", path="/api/goals")
+    event["queryStringParameters"] = {"site_id": "test-site", "days": "1"}
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+    assert len(body["goals"]) == 1
+
+
 def test_get_live_empty(ddb_table):
     query = load_query()
     event = make_event({}, method="GET", path="/api/live")

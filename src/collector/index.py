@@ -65,6 +65,36 @@ def _parse_os(ua):
             return name
     return "Other"
 
+# Referrer channel classification
+SEARCH_ENGINES = {"google", "bing", "yahoo", "duckduckgo", "baidu", "yandex", "ecosia", "brave"}
+SOCIAL_NETWORKS = {
+    "facebook", "twitter", "x", "linkedin", "reddit", "youtube", "instagram",
+    "pinterest", "tiktok", "mastodon", "threads", "hacker news",
+}
+EMAIL_PROVIDERS = {"mail", "email", "outlook", "gmail", "yahoo"}
+
+
+def _classify_channel(ref_domain, utm):
+    """Classify traffic source into a channel."""
+    if utm.get("utm_medium") in ("cpc", "ppc", "paid", "ad", "ads", "banner", "display"):
+        return "Paid"
+    if utm.get("utm_medium") == "email" or utm.get("utm_source") == "email":
+        return "Email"
+    if not ref_domain:
+        return "Direct"
+    domain_lower = ref_domain.lower()
+    # Strip www. and common TLDs for matching
+    base = domain_lower.replace("www.", "").split(".")[0]
+    if base in SEARCH_ENGINES or "search" in domain_lower:
+        return "Search"
+    if base in SOCIAL_NETWORKS or "t.co" in domain_lower:
+        return "Social"
+    for ep in EMAIL_PROVIDERS:
+        if ep in domain_lower:
+            return "Email"
+    return "Referral"
+
+
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -155,12 +185,44 @@ def handler(event, context):
     os_name = _parse_os(raw_ua)
     language = (body.get("lang") or "")[:16]
 
+    # Classify traffic channel
+    channel = _classify_channel(ref_domain, utm)
+
+    if event_type == "event":
+        # Custom event — store with event name and optional properties
+        event_name = (body.get("name") or "")[:64]
+        if not event_name:
+            return _resp(400, "missing event name")
+        event_props = body.get("props") or {}
+        # Sanitize props: string keys/values, max 10 props
+        clean_props = {}
+        for k, v in list(event_props.items())[:10]:
+            clean_props[str(k)[:32]] = str(v)[:128]
+
+        item = {
+            "pk": f"EVENT#{site_id}#{date_str}",
+            "sk": f"{now.isoformat()}#{uuid.uuid4().hex[:8]}",
+            "event_name": event_name,
+            "path": path_val,
+            "visitor": visitor_hash,
+            "session": session_id,
+            "ttl": ttl,
+        }
+        if clean_props:
+            item["props"] = clean_props
+        table.put_item(Item=item)
+
+        # Update event summary
+        _update_event_summary(site_id, date_str, ttl, event_name, visitor_hash)
+        return _resp(200, "ok")
+
     # Pageview event (raw)
     item = {
         "pk": f"{site_id}#{date_str}",
         "sk": f"{now.isoformat()}#{uuid.uuid4().hex[:8]}",
         "path": path_val,
         "referrer": ref_domain[:256],
+        "channel": channel,
         "country": country,
         "device": device,
         "browser": browser,
@@ -177,7 +239,7 @@ def handler(event, context):
 
     # Update daily summary counters (atomic increments)
     _update_summary(site_id, date_str, ttl, path_val, ref_domain, country, device,
-                    visitor_hash, session_id, browser, os_name, language, utm)
+                    visitor_hash, session_id, browser, os_name, language, utm, channel)
 
     # Track entry/exit pages per session
     if session_id:
@@ -189,13 +251,14 @@ def handler(event, context):
 
 
 def _update_summary(site_id, date_str, ttl, path_val, ref_domain, country, device,
-                    visitor_hash, session_id, browser, os_name, language, utm):
+                    visitor_hash, session_id, browser, os_name, language, utm, channel):
     """Atomically increment daily summary counters (two-step for nested maps)."""
     safe_path = path_val.replace("#", "_").replace(".", "_")[:64]
     safe_ref = ref_domain.replace("#", "_").replace(".", "_")[:64] if ref_domain else ""
     safe_browser = browser.replace("#", "_").replace(".", "_")[:32]
     safe_os = os_name.replace("#", "_").replace(".", "_")[:32]
     safe_lang = language.replace("#", "_").replace(".", "_")[:16] if language else ""
+    safe_channel = channel.replace("#", "_").replace(".", "_")[:32]
     key = {"pk": f"SUMMARY#{site_id}", "sk": date_str}
 
     try:
@@ -207,6 +270,7 @@ def _update_summary(site_id, date_str, ttl, path_val, ref_domain, country, devic
             "#browsers": "browsers", "#oses": "oses",
             "#languages": "languages", "#utm_sources": "utm_sources",
             "#utm_mediums": "utm_mediums", "#utm_campaigns": "utm_campaigns",
+            "#channels": "channels",
             "#ttl": "ttl",
         }
         attr_values = {
@@ -239,9 +303,10 @@ def _update_summary(site_id, date_str, ttl, path_val, ref_domain, country, devic
             "devices.#d = if_not_exists(devices.#d, :zero) + :one",
             "browsers.#br = if_not_exists(browsers.#br, :zero) + :one",
             "oses.#os = if_not_exists(oses.#os, :zero) + :one",
+            "channels.#ch = if_not_exists(channels.#ch, :zero) + :one",
         ]
         names = {"#p": safe_path, "#c": country, "#d": device,
-                 "#br": safe_browser, "#os": safe_os}
+                 "#br": safe_browser, "#os": safe_os, "#ch": safe_channel}
         vals = {":one": 1, ":zero": 0}
 
         if safe_ref:
@@ -274,6 +339,36 @@ def _update_summary(site_id, date_str, ttl, path_val, ref_domain, country, devic
         )
     except Exception:
         # Don't fail the request if summary update fails — raw data is already written
+        pass
+
+
+def _update_event_summary(site_id, date_str, ttl, event_name, visitor_hash):
+    """Atomically increment custom event counters."""
+    safe_name = event_name.replace("#", "_").replace(".", "_")[:64]
+    key = {"pk": f"EVENTS#{site_id}", "sk": date_str}
+    try:
+        table.update_item(
+            Key=key,
+            UpdateExpression=(
+                "SET #events = if_not_exists(#events, :empty_map), #ttl = :ttl "
+                "ADD #total :one, #visitors :vset"
+            ),
+            ExpressionAttributeNames={
+                "#events": "events", "#ttl": "ttl", "#total": "total_events",
+                "#visitors": "event_visitors",
+            },
+            ExpressionAttributeValues={
+                ":empty_map": {}, ":ttl": ttl, ":one": 1,
+                ":vset": {visitor_hash},
+            },
+        )
+        table.update_item(
+            Key=key,
+            UpdateExpression="SET events.#n = if_not_exists(events.#n, :zero) + :one",
+            ExpressionAttributeNames={"#n": safe_name},
+            ExpressionAttributeValues={":one": 1, ":zero": 0},
+        )
+    except Exception:
         pass
 
 
