@@ -206,6 +206,60 @@ td:last-child { text-align: right; font-weight: 600; color: #0ea5e9; white-space
 
 .empty { color: #475569; font-style: italic; font-size: 14px; }
 
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #334155;
+  padding-bottom: 0;
+}
+
+.tab {
+  background: none;
+  border: none;
+  color: #64748b;
+  font-size: 14px;
+  padding: 8px 16px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tab:hover { color: #94a3b8; }
+.tab-active { color: #e2e8f0; border-bottom-color: #0ea5e9; }
+
+.table-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.table-card-header h3 { margin-bottom: 0; }
+
+.btn-table-export {
+  background: none;
+  border: 1px solid #334155;
+  color: #64748b;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.btn-table-export:hover { color: #94a3b8; border-color: #475569; }
+
+.nowrap { white-space: nowrap; }
+
+thead th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  padding: 8px 8px 8px 0;
+  border-bottom: 1px solid #334155;
+}
+
 .manage-sites {
   background: #1e293b;
   border: 1px solid #334155;
