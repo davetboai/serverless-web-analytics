@@ -314,6 +314,7 @@ class AnalyticsStack(Stack):
             sources=[s3deploy.Source.asset(str(SRC / "tracker"))],
             destination_bucket=site_bucket,
             distribution=distribution,
+            prune=False,
         )
 
         # --- Route53 ---
