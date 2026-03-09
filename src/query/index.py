@@ -44,6 +44,12 @@ def handler(event, context):
     if path.endswith("/live"):
         return _get_live(params)
 
+    if path.endswith("/events"):
+        return _get_events(params)
+
+    if path.endswith("/recent"):
+        return _get_recent(params)
+
     return _get_stats(params)
 
 
@@ -128,6 +134,7 @@ def _get_stats(params):
     utm_sources: Counter = Counter()
     utm_mediums: Counter = Counter()
     utm_campaigns: Counter = Counter()
+    channels: Counter = Counter()
     dates = []
 
     current = start_date
@@ -165,6 +172,8 @@ def _get_stats(params):
             utm_mediums[med] += int(c)
         for cmp, c in (summary.get("utm_campaigns") or {}).items():
             utm_campaigns[cmp] += int(c)
+        for ch, c in (summary.get("channels") or {}).items():
+            channels[ch] += int(c)
 
         dates.append({
             "date": d,
@@ -211,7 +220,76 @@ def _get_stats(params):
         "utmCampaigns": [{"name": cp, "count": c} for cp, c in utm_campaigns.most_common(20)],
         "entryPages": [{"path": p, "count": c} for p, c in entry_pages.most_common(20)],
         "exitPages": [{"path": p, "count": c} for p, c in exit_pages.most_common(20)],
+        "channels": [{"name": ch, "count": c} for ch, c in channels.most_common(20)],
     })
+
+
+def _get_events(params):
+    """Return custom event stats for a site over a date range."""
+    site_id = params.get("site_id", "")
+    if not site_id:
+        return _resp(400, {"error": "missing site_id"})
+
+    days = min(int(params.get("days", 7)), 90)
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=days - 1)
+
+    event_summaries = table.query(
+        KeyConditionExpression=(
+            Key("pk").eq(f"EVENTS#{site_id}")
+            & Key("sk").between(start_date.isoformat(), end_date.isoformat())
+        ),
+    ).get("Items", [])
+
+    events: Counter = Counter()
+    total = 0
+    all_visitors: set = set()
+    for s in event_summaries:
+        total += int(s.get("total_events", 0))
+        visitors = s.get("event_visitors", set())
+        if isinstance(visitors, set):
+            all_visitors.update(visitors)
+        for name, count in (s.get("events") or {}).items():
+            events[name] += int(count)
+
+    return _resp(200, {
+        "totalEvents": total,
+        "uniqueVisitors": len(all_visitors),
+        "events": [{"name": n, "count": c} for n, c in events.most_common(50)],
+    })
+
+
+def _get_recent(params):
+    """Return recent pageviews (last ~30 min) for real-time feed."""
+    site_id = params.get("site_id", "")
+    if not site_id:
+        return _resp(400, {"error": "missing site_id"})
+
+    now = datetime.now(timezone.utc)
+    date_str = now.strftime("%Y-%m-%d")
+    cutoff = (now - timedelta(minutes=30)).isoformat()
+
+    items = table.query(
+        KeyConditionExpression=(
+            Key("pk").eq(f"{site_id}#{date_str}")
+            & Key("sk").gte(cutoff)
+        ),
+        ScanIndexForward=False,
+        Limit=50,
+    ).get("Items", [])
+
+    recent = []
+    for item in items:
+        recent.append({
+            "time": item["sk"].split("#")[0],
+            "path": item.get("path", ""),
+            "country": item.get("country", ""),
+            "device": item.get("device", ""),
+            "browser": item.get("browser", ""),
+            "referrer": item.get("referrer", ""),
+        })
+
+    return _resp(200, {"recent": recent})
 
 
 def _get_live(params):

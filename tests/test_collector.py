@@ -269,6 +269,108 @@ def test_browser_detection_edge(ddb_table):
     assert pageview["os"] == "Windows"
 
 
+def test_channel_classification(ddb_table):
+    """Verify referrer domain is classified into a traffic channel."""
+    collector = load_collector()
+
+    # Google referrer → Search
+    event = make_event({
+        "sid": "test-site",
+        "url": "/",
+        "ref": "https://www.google.com/search?q=test",
+    })
+    collector.handler(event, None)
+
+    items = ddb_table.scan()["Items"]
+    pageview = [i for i in items if i["pk"].startswith("test-site#")][0]
+    assert pageview["channel"] == "Search"
+
+    summary = [i for i in items if i["pk"].startswith("SUMMARY#")][0]
+    assert "channels" in summary
+    assert int(summary["channels"]["Search"]) == 1
+
+
+def test_channel_direct(ddb_table):
+    """No referrer → Direct channel."""
+    collector = load_collector()
+    event = make_event({"sid": "test-site", "url": "/", "ref": ""})
+    collector.handler(event, None)
+
+    items = ddb_table.scan()["Items"]
+    pageview = [i for i in items if i["pk"].startswith("test-site#")][0]
+    assert pageview["channel"] == "Direct"
+
+
+def test_channel_social(ddb_table):
+    """Twitter referrer → Social channel."""
+    collector = load_collector()
+    event = make_event({
+        "sid": "test-site",
+        "url": "/",
+        "ref": "https://twitter.com/user/status/123",
+    })
+    collector.handler(event, None)
+
+    items = ddb_table.scan()["Items"]
+    pageview = [i for i in items if i["pk"].startswith("test-site#")][0]
+    assert pageview["channel"] == "Social"
+
+
+def test_channel_paid_utm(ddb_table):
+    """UTM medium=cpc → Paid channel even with google referrer."""
+    collector = load_collector()
+    event = make_event({
+        "sid": "test-site",
+        "url": "/?utm_medium=cpc&utm_source=google",
+        "ref": "https://www.google.com/",
+    })
+    collector.handler(event, None)
+
+    items = ddb_table.scan()["Items"]
+    pageview = [i for i in items if i["pk"].startswith("test-site#")][0]
+    assert pageview["channel"] == "Paid"
+
+
+def test_custom_event(ddb_table):
+    """Verify custom events are stored and summarized."""
+    collector = load_collector()
+
+    event = make_event({
+        "sid": "test-site",
+        "type": "event",
+        "name": "signup",
+        "props": {"plan": "pro"},
+        "url": "/pricing",
+        "ses": "s1",
+    })
+    result = collector.handler(event, None)
+    assert result["statusCode"] == 200
+
+    items = ddb_table.scan()["Items"]
+    events = [i for i in items if i["pk"].startswith("EVENT#")]
+    assert len(events) == 1
+    assert events[0]["event_name"] == "signup"
+    assert events[0]["props"]["plan"] == "pro"
+
+    event_summaries = [i for i in items if i["pk"].startswith("EVENTS#")]
+    assert len(event_summaries) == 1
+    assert int(event_summaries[0]["total_events"]) == 1
+    assert int(event_summaries[0]["events"]["signup"]) == 1
+
+
+def test_custom_event_missing_name(ddb_table):
+    """Custom event without name should return 400."""
+    collector = load_collector()
+
+    event = make_event({
+        "sid": "test-site",
+        "type": "event",
+        "url": "/",
+    })
+    result = collector.handler(event, None)
+    assert result["statusCode"] == 400
+
+
 def test_path_strips_query_string(ddb_table):
     """Stored path should not include query parameters."""
     collector = load_collector()

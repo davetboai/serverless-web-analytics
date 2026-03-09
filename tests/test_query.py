@@ -173,6 +173,95 @@ def test_get_stats_with_new_fields(ddb_table):
     assert body["exitPages"][0]["path"] == "/pricing"
 
 
+def test_get_stats_channels(ddb_table):
+    """Verify channels are returned in stats."""
+    query = load_query()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    ddb_table.put_item(Item={
+        "pk": "SUMMARY#test-site",
+        "sk": today,
+        "pageviews": 10,
+        "visitors": {"v1"},
+        "sessions": {"v1#s1"},
+        "paths": {"/": 10},
+        "countries": {"US": 10},
+        "devices": {"desktop": 10},
+        "referrers": {},
+        "browsers": {},
+        "oses": {},
+        "languages": {},
+        "channels": {"Search": 5, "Direct": 3, "Social": 2},
+        "ttl": 9999999999,
+    })
+
+    event = make_event({}, method="GET", path="/api/query")
+    event["queryStringParameters"] = {"site_id": "test-site", "days": "1"}
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+
+    assert len(body["channels"]) == 3
+    assert body["channels"][0]["name"] == "Search"
+
+
+def test_get_events(ddb_table):
+    """Verify /api/events returns custom event data."""
+    query = load_query()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    ddb_table.put_item(Item={
+        "pk": f"EVENTS#test-site",
+        "sk": today,
+        "total_events": 15,
+        "event_visitors": {"v1", "v2"},
+        "events": {"signup": 10, "purchase": 5},
+        "ttl": 9999999999,
+    })
+
+    event = make_event({}, method="GET", path="/api/events")
+    event["queryStringParameters"] = {"site_id": "test-site", "days": "1"}
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert body["totalEvents"] == 15
+    assert body["uniqueVisitors"] == 2
+    assert len(body["events"]) == 2
+    assert body["events"][0]["name"] == "signup"
+    assert body["events"][0]["count"] == 10
+
+
+def test_get_recent(ddb_table):
+    """Verify /api/recent returns recent pageviews."""
+    query = load_query()
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+
+    # Insert a recent pageview
+    ddb_table.put_item(Item={
+        "pk": f"test-site#{today}",
+        "sk": f"{now.isoformat()}#abc12345",
+        "path": "/hello",
+        "country": "US",
+        "device": "desktop",
+        "browser": "Chrome",
+        "referrer": "google.com",
+        "visitor": "v1",
+        "session": "s1",
+        "ttl": 9999999999,
+    })
+
+    event = make_event({}, method="GET", path="/api/recent")
+    event["queryStringParameters"] = {"site_id": "test-site"}
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert len(body["recent"]) == 1
+    assert body["recent"][0]["path"] == "/hello"
+    assert body["recent"][0]["browser"] == "Chrome"
+
+
 def test_get_live_empty(ddb_table):
     query = load_query()
     event = make_event({}, method="GET", path="/api/live")

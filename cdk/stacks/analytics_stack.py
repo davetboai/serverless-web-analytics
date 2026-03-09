@@ -132,6 +132,16 @@ class AnalyticsStack(Stack):
             methods=[apigwv2.HttpMethod.GET],
             integration=query_integration,
         )
+        api.add_routes(
+            path="/api/events",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=query_integration,
+        )
+        api.add_routes(
+            path="/api/recent",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=query_integration,
+        )
 
         # --- S3 bucket for dashboard + tracker script ---
         site_bucket = s3.Bucket(
@@ -210,6 +220,20 @@ class AnalyticsStack(Stack):
                     allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
                 ),
                 "/api/live": cloudfront.BehaviorOptions(
+                    origin=query_origin,
+                    viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                    cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
+                    origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                    allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+                ),
+                "/api/events": cloudfront.BehaviorOptions(
+                    origin=query_origin,
+                    viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                    cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
+                    origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                    allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+                ),
+                "/api/recent": cloudfront.BehaviorOptions(
                     origin=query_origin,
                     viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                     cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,

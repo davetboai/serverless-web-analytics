@@ -50,6 +50,20 @@ interface StatsData {
   utmCampaigns: { name: string; count: number }[];
   entryPages: { path: string; count: number }[];
   exitPages: { path: string; count: number }[];
+  channels: { name: string; count: number }[];
+}
+interface EventsData {
+  totalEvents: number;
+  uniqueVisitors: number;
+  events: { name: string; count: number }[];
+}
+interface RecentEntry {
+  time: string;
+  path: string;
+  country: string;
+  device: string;
+  browser: string;
+  referrer: string;
 }
 
 async function apiFetch(
@@ -90,19 +104,22 @@ function countryFlag(code: string) {
   return String.fromCodePoint(a, b) + " ";
 }
 
-function exportCsv(stats: StatsData) {
-  const rows = [
-    ["Date", "Pageviews", "Visitors"],
-    ...stats.dates.map((d) => [d.date, d.pageviews, d.visitors]),
-  ];
+function downloadCsv(rows: (string | number)[][], filename: string) {
   const csv = rows.map((r) => r.join(",")).join("\n");
   const blob = new Blob([csv], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "analytics.csv";
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+function exportCsv(stats: StatsData) {
+  downloadCsv(
+    [["Date", "Pageviews", "Visitors"], ...stats.dates.map((d) => [d.date, d.pageviews, d.visitors])],
+    "analytics.csv"
+  );
 }
 
 export default function Dashboard() {
@@ -116,6 +133,9 @@ export default function Dashboard() {
   const [showManage, setShowManage] = useState(false);
   const [newSiteId, setNewSiteId] = useState("");
   const [newSiteDomain, setNewSiteDomain] = useState("");
+  const [eventsData, setEventsData] = useState<EventsData | null>(null);
+  const [recentData, setRecentData] = useState<RecentEntry[]>([]);
+  const [activeTab, setActiveTab] = useState<"overview" | "events" | "realtime">("overview");
 
   const refreshSites = () =>
     apiFetch("/api/sites")
@@ -156,6 +176,24 @@ export default function Dashboard() {
     const interval = setInterval(fetchLive, 30000);
     return () => clearInterval(interval);
   }, [siteId]);
+
+  useEffect(() => {
+    if (!siteId || activeTab !== "events") return;
+    apiFetch("/api/events", { site_id: siteId, days })
+      .then((data) => setEventsData(data))
+      .catch(() => {});
+  }, [siteId, days, activeTab]);
+
+  useEffect(() => {
+    if (!siteId || activeTab !== "realtime") return;
+    const fetchRecent = () =>
+      apiFetch("/api/recent", { site_id: siteId })
+        .then((data) => setRecentData(data.recent || []))
+        .catch(() => {});
+    fetchRecent();
+    const interval = setInterval(fetchRecent, 10000);
+    return () => clearInterval(interval);
+  }, [siteId, activeTab]);
 
   const chartData = stats
     ? {
@@ -288,14 +326,26 @@ export default function Dashboard() {
       {error && <div className="error">{error}</div>}
       {loading && <div className="loading">Loading...</div>}
 
-      {stats && (
-        <>
-          {liveCount !== null && (
-            <div className="live-indicator">
-              <span className="live-dot" /> {fmt(liveCount)} currently online
-            </div>
-          )}
+      {liveCount !== null && (
+        <div className="live-indicator">
+          <span className="live-dot" /> {fmt(liveCount)} currently online
+        </div>
+      )}
 
+      <div className="tabs">
+        {(["overview", "events", "realtime"] as const).map((tab) => (
+          <button
+            key={tab}
+            className={`tab ${activeTab === tab ? "tab-active" : ""}`}
+            onClick={() => setActiveTab(tab)}
+          >
+            {tab === "overview" ? "Overview" : tab === "events" ? "Events" : "Real-time"}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === "overview" && stats && (
+        <>
           <div className="stats-grid">
             <div className="stat-card">
               <div className="stat-label">Pageviews</div>
@@ -331,10 +381,26 @@ export default function Dashboard() {
             <BarTableCard
               title="Top Pages"
               rows={stats.topPages.map((p) => [p.path, p.count])}
+              onExport={() => downloadCsv(
+                [["Path", "Count"], ...stats.topPages.map((p) => [p.path, p.count])],
+                "top-pages.csv"
+              )}
             />
             <BarTableCard
               title="Referrers"
               rows={stats.topReferrers.map((r) => [r.domain, r.count])}
+              onExport={() => downloadCsv(
+                [["Referrer", "Count"], ...stats.topReferrers.map((r) => [r.domain, r.count])],
+                "referrers.csv"
+              )}
+            />
+            <BarTableCard
+              title="Channels"
+              rows={(stats.channels || []).map((c) => [c.name, c.count])}
+              onExport={() => downloadCsv(
+                [["Channel", "Count"], ...(stats.channels || []).map((c) => [c.name, c.count])],
+                "channels.csv"
+              )}
             />
             <BarTableCard
               title="Countries"
@@ -394,6 +460,71 @@ export default function Dashboard() {
           )}
         </>
       )}
+
+      {activeTab === "events" && (
+        <div className="events-panel">
+          {eventsData ? (
+            <>
+              <div className="stats-grid">
+                <div className="stat-card">
+                  <div className="stat-label">Total Events</div>
+                  <div className="stat-value">{fmt(eventsData.totalEvents)}</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-label">Unique Visitors</div>
+                  <div className="stat-value">{fmt(eventsData.uniqueVisitors)}</div>
+                </div>
+              </div>
+              <div className="tables-grid">
+                <BarTableCard
+                  title="Custom Events"
+                  rows={eventsData.events.map((e) => [e.name, e.count])}
+                  onExport={() => downloadCsv(
+                    [["Event", "Count"], ...eventsData.events.map((e) => [e.name, e.count])],
+                    "events.csv"
+                  )}
+                />
+              </div>
+            </>
+          ) : (
+            <div className="empty">No event data yet. Track events with: window.sa.event("name", &#123;props&#125;)</div>
+          )}
+        </div>
+      )}
+
+      {activeTab === "realtime" && (
+        <div className="realtime-panel">
+          <h2 className="section-title">Last 30 Minutes</h2>
+          {recentData.length === 0 ? (
+            <div className="empty">No recent pageviews</div>
+          ) : (
+            <div className="table-card">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Page</th>
+                    <th>Country</th>
+                    <th>Browser</th>
+                    <th>Referrer</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentData.map((r, i) => (
+                    <tr key={i}>
+                      <td className="nowrap">{r.time.split("T")[1]?.split(".")[0] || r.time}</td>
+                      <td>{r.path}</td>
+                      <td>{countryFlag(r.country)}{r.country}</td>
+                      <td>{r.browser}</td>
+                      <td>{r.referrer || "Direct"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </>
   );
 }
@@ -401,14 +532,21 @@ export default function Dashboard() {
 function BarTableCard({
   title,
   rows,
+  onExport,
 }: {
   title: string;
   rows: [string, number][];
+  onExport?: () => void;
 }) {
   const max = rows.length > 0 ? Math.max(...rows.map(([, c]) => c)) : 1;
   return (
     <div className="table-card">
-      <h3>{title}</h3>
+      <div className="table-card-header">
+        <h3>{title}</h3>
+        {onExport && rows.length > 0 && (
+          <button className="btn-table-export" onClick={onExport} title="Export CSV">CSV</button>
+        )}
+      </div>
       {rows.length === 0 ? (
         <div className="empty">No data</div>
       ) : (
