@@ -127,6 +127,37 @@
     } catch (err) {}
   });
 
+  // Scroll depth tracking — fire at 25/50/75/100% thresholds
+  var scrollMarks = {};
+  function trackScroll() {
+    var docHeight = Math.max(
+      document.body.scrollHeight,
+      document.documentElement.scrollHeight
+    );
+    var viewHeight = window.innerHeight;
+    if (docHeight <= viewHeight) return; // no scrolling needed
+    var scrolled = window.scrollY + viewHeight;
+    var pct = Math.round((scrolled / docHeight) * 100);
+    var thresholds = [25, 50, 75, 100];
+    var page = location.pathname;
+    for (var i = 0; i < thresholds.length; i++) {
+      var t = thresholds[i];
+      var key = page + ":" + t;
+      if (pct >= t && !scrollMarks[key]) {
+        scrollMarks[key] = true;
+        trackEvent("scroll", { depth: String(t), page: page });
+      }
+    }
+  }
+  var scrollTimer = null;
+  window.addEventListener("scroll", function () {
+    if (scrollTimer) return;
+    scrollTimer = setTimeout(function () {
+      scrollTimer = null;
+      trackScroll();
+    }, 200);
+  }, { passive: true });
+
   // Heartbeat ping every 30s while page is visible
   var pingInterval = null;
   function startPing() {

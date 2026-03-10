@@ -108,6 +108,10 @@ def handler(event, context):
     if method == "OPTIONS":
         return {"statusCode": 200, "headers": CORS_HEADERS, "body": ""}
 
+    path = event.get("rawPath", "")
+    if path.endswith("/ingest"):
+        return _handle_server_event(event)
+
     try:
         body = json.loads(event.get("body", "{}"))
     except (json.JSONDecodeError, TypeError):
@@ -434,6 +438,77 @@ def _get_site_ttl(site_id):
     except Exception:
         _site_ttl_cache[site_id] = None
     return _site_ttl_cache[site_id]
+
+
+def _handle_server_event(event):
+    """Server-side event API — accepts events with API key auth."""
+    try:
+        body = json.loads(event.get("body", "{}"))
+    except (json.JSONDecodeError, TypeError):
+        return _resp(400, "invalid json")
+
+    site_id = (body.get("site_id") or "").strip()
+    api_key = (body.get("api_key") or "").strip()
+    if not site_id or not api_key:
+        return _resp(400, "site_id and api_key required")
+
+    # Validate API key against stored site record
+    if not _validate_api_key(site_id, api_key):
+        return _resp(403, "invalid api_key")
+
+    now = datetime.now(timezone.utc)
+    date_str = now.strftime("%Y-%m-%d")
+
+    site_ttl_days = _get_site_ttl(site_id)
+    ttl = int(now.timestamp()) + (86400 * (site_ttl_days or 395))
+
+    event_name = (body.get("name") or "").strip()[:64]
+    if not event_name:
+        return _resp(400, "name required")
+
+    # Use provided user_id or generate from event data
+    user_id = (body.get("user_id") or "")[:64]
+    visitor_hash = hashlib.sha256(f"server:{user_id}:{site_id}".encode()).hexdigest()[:16] if user_id else uuid.uuid4().hex[:16]
+
+    props = body.get("props") or {}
+    clean_props = {}
+    for k, v in list(props.items())[:10]:
+        clean_props[str(k)[:32]] = str(v)[:128]
+
+    item = {
+        "pk": f"EVENT#{site_id}#{date_str}",
+        "sk": f"{now.isoformat()}#{uuid.uuid4().hex[:8]}",
+        "event_name": event_name,
+        "path": (body.get("url") or "/")[:512],
+        "visitor": visitor_hash,
+        "session": "server",
+        "ttl": ttl,
+    }
+    if clean_props:
+        item["props"] = clean_props
+    table.put_item(Item=item)
+
+    _update_event_summary(site_id, date_str, ttl, event_name, visitor_hash)
+    return _resp(200, "ok")
+
+
+_api_key_cache = {}
+
+
+def _validate_api_key(site_id, api_key):
+    """Check API key against the site record (cached)."""
+    cache_key = f"{site_id}:{api_key}"
+    if cache_key in _api_key_cache:
+        return _api_key_cache[cache_key]
+    try:
+        result = table.get_item(Key={"pk": "SITES", "sk": site_id})
+        item = result.get("Item", {})
+        stored_key = item.get("api_key", "")
+        valid = stored_key and stored_key == api_key
+        _api_key_cache[cache_key] = valid
+    except Exception:
+        _api_key_cache[cache_key] = False
+    return _api_key_cache[cache_key]
 
 
 def _register_site(site_id):
