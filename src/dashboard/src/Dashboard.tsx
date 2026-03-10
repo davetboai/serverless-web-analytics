@@ -26,6 +26,7 @@ interface SiteInfo {
   id: string;
   domain: string;
   ttl_days?: number;
+  api_key?: string;
 }
 interface DateEntry {
   date: string;
@@ -77,6 +78,22 @@ interface GoalData {
 interface GoalsResponse {
   goals: GoalData[];
   totalVisitors: number;
+}
+interface FunnelStep {
+  label: string;
+  type: string;
+  value: string;
+  visitors: number;
+  dropOff: number;
+}
+interface FunnelData {
+  id: string;
+  name: string;
+  steps: FunnelStep[];
+  conversionRate: number;
+}
+interface FunnelsResponse {
+  funnels: FunnelData[];
 }
 interface PerfData {
   sampleCount: number;
@@ -180,9 +197,15 @@ export default function Dashboard() {
   const [newGoalName, setNewGoalName] = useState("");
   const [newGoalType, setNewGoalType] = useState<"page" | "event">("page");
   const [newGoalValue, setNewGoalValue] = useState("");
-  const [activeTab, setActiveTab] = useState<"overview" | "events" | "realtime" | "performance">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "events" | "realtime" | "performance" | "funnels">("overview");
   const [perfData, setPerfData] = useState<PerfData | null>(null);
   const [compareData, setCompareData] = useState<CompareData | null>(null);
+  const [funnelsData, setFunnelsData] = useState<FunnelsResponse | null>(null);
+  const [showFunnelForm, setShowFunnelForm] = useState(false);
+  const [newFunnelName, setNewFunnelName] = useState("");
+  const [newFunnelSteps, setNewFunnelSteps] = useState<{type: string; value: string; label: string}[]>([
+    {type: "page", value: "", label: ""}, {type: "page", value: "", label: ""},
+  ]);
 
   const refreshSites = () =>
     apiFetch("/api/sites")
@@ -245,6 +268,18 @@ export default function Dashboard() {
       .then((data) => setCompareData(data))
       .catch(() => setCompareData(null));
   }, [siteId, days]);
+
+  const refreshFunnels = () => {
+    if (!siteId) return;
+    apiFetch("/api/funnels", { site_id: siteId, days })
+      .then((data) => setFunnelsData(data))
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    if (!siteId || activeTab !== "funnels") return;
+    refreshFunnels();
+  }, [siteId, days, activeTab]);
 
   useEffect(() => {
     if (!siteId || activeTab !== "performance") return;
@@ -371,6 +406,12 @@ export default function Dashboard() {
               <div key={s.id} className="manage-row">
                 <span className="manage-id">{s.id}</span>
                 <span className="manage-domain">{s.domain}</span>
+                {s.api_key && (
+                  <span className="manage-api-key" title="API key for server-side events">
+                    <code>{s.api_key.slice(0, 8)}...</code>
+                    <button className="btn-table-export" onClick={() => { navigator.clipboard.writeText(s.api_key || ""); }}>Copy</button>
+                  </span>
+                )}
                 <label className="manage-ttl" title="Data retention in days (30-730)">
                   TTL
                   <input
@@ -420,13 +461,13 @@ export default function Dashboard() {
       )}
 
       <div className="tabs">
-        {(["overview", "events", "performance", "realtime"] as const).map((tab) => (
+        {(["overview", "events", "funnels", "performance", "realtime"] as const).map((tab) => (
           <button
             key={tab}
             className={`tab ${activeTab === tab ? "tab-active" : ""}`}
             onClick={() => setActiveTab(tab)}
           >
-            {tab === "overview" ? "Overview" : tab === "events" ? "Events" : tab === "performance" ? "Performance" : "Real-time"}
+            {{overview: "Overview", events: "Events", funnels: "Funnels", performance: "Performance", realtime: "Real-time"}[tab]}
           </button>
         ))}
       </div>
@@ -641,6 +682,79 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="empty">No goals defined yet</div>
+          )}
+        </div>
+      )}
+
+      {activeTab === "funnels" && (
+        <div className="funnels-panel">
+          <button className="btn-export" onClick={() => setShowFunnelForm(!showFunnelForm)} style={{marginBottom: 12}}>
+            {showFunnelForm ? "Cancel" : "Create Funnel"}
+          </button>
+          {showFunnelForm && (
+            <div className="manage-sites" style={{marginBottom: 16}}>
+              <div className="manage-add" style={{flexDirection: "column", gap: 8}}>
+                <input placeholder="Funnel name" value={newFunnelName} onChange={(e) => setNewFunnelName(e.target.value)} />
+                {newFunnelSteps.map((step, i) => (
+                  <div key={i} style={{display: "flex", gap: 8, alignItems: "center"}}>
+                    <span style={{color: "#64748b", fontSize: 12, minWidth: 50}}>Step {i + 1}</span>
+                    <select value={step.type} onChange={(e) => {
+                      const s = [...newFunnelSteps]; s[i] = {...s[i], type: e.target.value}; setNewFunnelSteps(s);
+                    }} style={{flex: "none", width: "auto", background: "#0f172a", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, padding: "6px 8px", fontSize: 13}}>
+                      <option value="page">Page</option>
+                      <option value="event">Event</option>
+                    </select>
+                    <input placeholder={step.type === "page" ? "/signup" : "purchase"} value={step.value}
+                      onChange={(e) => { const s = [...newFunnelSteps]; s[i] = {...s[i], value: e.target.value}; setNewFunnelSteps(s); }} />
+                    <input placeholder="Label (optional)" value={step.label}
+                      onChange={(e) => { const s = [...newFunnelSteps]; s[i] = {...s[i], label: e.target.value}; setNewFunnelSteps(s); }} />
+                    {newFunnelSteps.length > 2 && (
+                      <button className="btn-danger" onClick={() => setNewFunnelSteps(newFunnelSteps.filter((_, j) => j !== i))}>X</button>
+                    )}
+                  </div>
+                ))}
+                <div style={{display: "flex", gap: 8}}>
+                  <button className="btn-export" onClick={() => setNewFunnelSteps([...newFunnelSteps, {type: "page", value: "", label: ""}])}>+ Step</button>
+                  <button className="btn-export" onClick={() => {
+                    if (!newFunnelName.trim() || newFunnelSteps.some(s => !s.value.trim())) return;
+                    apiFetch("/api/funnels", {}, {
+                      method: "POST",
+                      body: { site_id: siteId, name: newFunnelName.trim(), steps: newFunnelSteps.map(s => ({...s, label: s.label || s.value})) },
+                    }).then(() => {
+                      setNewFunnelName(""); setNewFunnelSteps([{type: "page", value: "", label: ""}, {type: "page", value: "", label: ""}]);
+                      setShowFunnelForm(false); refreshFunnels();
+                    }).catch((e) => setError(e.message));
+                  }}>Create</button>
+                </div>
+              </div>
+            </div>
+          )}
+          {funnelsData && funnelsData.funnels.length > 0 ? (
+            funnelsData.funnels.map((f) => (
+              <div key={f.id} className="table-card" style={{marginBottom: 16}}>
+                <div className="table-card-header">
+                  <h3>{f.name} <span style={{fontWeight: 400, color: "#64748b"}}>({f.conversionRate}% conversion)</span></h3>
+                  <button className="btn-danger" onClick={() => {
+                    apiFetch("/api/funnels", {}, { method: "DELETE", body: { site_id: siteId, id: f.id } })
+                      .then(() => refreshFunnels()).catch((e) => setError(e.message));
+                  }}>Delete</button>
+                </div>
+                <div className="funnel-steps">
+                  {f.steps.map((step, i) => (
+                    <div key={i} className="funnel-step">
+                      <div className="funnel-bar" style={{width: `${f.steps[0].visitors > 0 ? (step.visitors / f.steps[0].visitors) * 100 : 0}%`}} />
+                      <div className="funnel-step-content">
+                        <span className="funnel-step-label">{step.label}</span>
+                        <span className="funnel-step-count">{fmt(step.visitors)}</span>
+                        {i > 0 && step.dropOff > 0 && <span className="funnel-drop">-{step.dropOff}%</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="empty">No funnels defined yet. Create one to track multi-step conversion paths.</div>
           )}
         </div>
       )}
