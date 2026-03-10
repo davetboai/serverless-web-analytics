@@ -468,6 +468,92 @@ def test_list_sites_returns_ttl(ddb_table):
     assert body["sites"][0]["ttl_days"] == 120
 
 
+def test_create_and_get_funnels(ddb_table):
+    """Verify funnel CRUD and step-by-step conversion computation."""
+    query = load_query()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Create a funnel: / -> /pricing -> /signup
+    event = make_event(
+        {"site_id": "test-site", "name": "Signup Flow", "steps": [
+            {"type": "page", "value": "/", "label": "Home"},
+            {"type": "page", "value": "/pricing", "label": "Pricing"},
+            {"type": "page", "value": "/signup", "label": "Signup"},
+        ]},
+        method="POST", path="/api/funnels",
+    )
+    result = query.handler(event, None)
+    assert result["statusCode"] == 201
+    body = json.loads(result["body"])
+    assert body["name"] == "Signup Flow"
+    assert len(body["steps"]) == 3
+
+    # Add raw pageview data — visitor v1 completes all 3, v2 drops at pricing
+    for i, (visitor, path) in enumerate([
+        ("v1", "/"), ("v1", "/pricing"), ("v1", "/signup"),
+        ("v2", "/"), ("v2", "/pricing"),
+        ("v3", "/"),
+    ]):
+        ddb_table.put_item(Item={
+            "pk": f"test-site#{today}",
+            "sk": f"{today}T00:0{i}:00#abc{i}",
+            "path": path,
+            "visitor": visitor,
+            "country": "US",
+            "device": "desktop",
+            "ttl": 9999999999,
+        })
+
+    # Get funnel analysis
+    event = make_event({}, method="GET", path="/api/funnels")
+    event["queryStringParameters"] = {"site_id": "test-site", "days": "1"}
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+
+    assert len(body["funnels"]) == 1
+    f = body["funnels"][0]
+    assert f["steps"][0]["visitors"] == 3  # 3 visited /
+    assert f["steps"][1]["visitors"] == 2  # 2 visited /pricing
+    assert f["steps"][2]["visitors"] == 1  # 1 visited /signup
+    assert f["conversionRate"] == 33.3  # 1/3
+
+    # Delete funnel
+    event = make_event(
+        {"site_id": "test-site", "id": "signup-flow"},
+        method="DELETE", path="/api/funnels",
+    )
+    result = query.handler(event, None)
+    assert result["statusCode"] == 200
+
+
+def test_create_site_generates_api_key(ddb_table):
+    """Verify POST /api/sites returns an API key."""
+    query = load_query()
+    event = make_event(
+        {"id": "key-site", "domain": "key.example.com"},
+        method="POST", path="/api/sites",
+    )
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+    assert result["statusCode"] == 201
+    assert len(body["api_key"]) > 16
+
+    # Verify it's in the DB
+    item = ddb_table.get_item(Key={"pk": "SITES", "sk": "key-site"}).get("Item")
+    assert item["api_key"] == body["api_key"]
+
+
+def test_list_sites_returns_api_key(ddb_table):
+    """Verify GET /api/sites includes api_key."""
+    query = load_query()
+    ddb_table.put_item(Item={"pk": "SITES", "sk": "my-site", "domain": "example.com", "api_key": "secret123"})
+
+    event = make_event({}, method="GET", path="/api/sites")
+    result = query.handler(event, None)
+    body = json.loads(result["body"])
+    assert body["sites"][0]["api_key"] == "secret123"
+
+
 def test_get_live_empty(ddb_table):
     query = load_query()
     event = make_event({}, method="GET", path="/api/live")

@@ -409,6 +409,45 @@ def test_path_strips_query_string(ddb_table):
     assert pageview["path"] == "/search"
 
 
+def test_server_side_event(ddb_table):
+    """Verify /api/ingest accepts events with API key auth."""
+    collector = load_collector()
+    collector._api_key_cache.clear()
+
+    # Create a site with API key
+    ddb_table.put_item(Item={"pk": "SITES", "sk": "test-site", "domain": "test.com", "api_key": "test-key-123"})
+
+    event = make_event(
+        {"site_id": "test-site", "api_key": "test-key-123", "name": "purchase", "user_id": "user42", "props": {"amount": "99"}},
+        method="POST",
+        path="/api/ingest",
+    )
+    result = collector.handler(event, None)
+    assert result["statusCode"] == 200
+
+    items = ddb_table.scan()["Items"]
+    events = [i for i in items if i["pk"].startswith("EVENT#")]
+    assert len(events) == 1
+    assert events[0]["event_name"] == "purchase"
+    assert events[0]["props"]["amount"] == "99"
+
+
+def test_server_side_event_bad_key(ddb_table):
+    """Verify /api/ingest rejects invalid API key."""
+    collector = load_collector()
+    collector._api_key_cache.clear()
+
+    ddb_table.put_item(Item={"pk": "SITES", "sk": "test-site", "domain": "test.com", "api_key": "real-key"})
+
+    event = make_event(
+        {"site_id": "test-site", "api_key": "wrong-key", "name": "test"},
+        method="POST",
+        path="/api/ingest",
+    )
+    result = collector.handler(event, None)
+    assert result["statusCode"] == 403
+
+
 def test_perf_event(ddb_table):
     """Verify performance metrics are stored as PERF# records."""
     collector = load_collector()

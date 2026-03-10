@@ -1,5 +1,6 @@
 import json
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 
@@ -68,6 +69,18 @@ def handler(event, context):
     if path.endswith("/compare"):
         return _get_compare(params)
 
+    if path.endswith("/funnels"):
+        body = {}
+        try:
+            body = json.loads(event.get("body", "{}") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        if method == "POST":
+            return _create_funnel(body)
+        if method == "DELETE":
+            return _delete_funnel(body)
+        return _get_funnels(params)
+
     return _get_stats(params)
 
 
@@ -77,6 +90,7 @@ def _list_sites():
         "id": item["sk"],
         "domain": item.get("domain", ""),
         "ttl_days": int(item.get("ttl_days", 395)),
+        "api_key": item.get("api_key", ""),
     } for item in result.get("Items", [])]
     return _resp(200, {"sites": sites})
 
@@ -86,11 +100,12 @@ def _create_site(body):
     if not site_id or len(site_id) > 64:
         return _resp(400, {"error": "invalid site id"})
     domain = (body.get("domain") or site_id)[:256]
+    api_key = secrets.token_urlsafe(24)
     table.put_item(
-        Item={"pk": "SITES", "sk": site_id, "domain": domain},
+        Item={"pk": "SITES", "sk": site_id, "domain": domain, "api_key": api_key},
         ConditionExpression="attribute_not_exists(pk) AND attribute_not_exists(sk)",
     )
-    return _resp(201, {"id": site_id, "domain": domain})
+    return _resp(201, {"id": site_id, "domain": domain, "api_key": api_key})
 
 
 def _rename_site(body):
@@ -567,6 +582,145 @@ def _query_all(pk):
         )
         items.extend(result.get("Items", []))
     return items
+
+
+def _create_funnel(body):
+    """Create a funnel definition with ordered steps (page paths or event names)."""
+    site_id = (body.get("site_id") or "").strip()
+    name = (body.get("name") or "").strip()
+    steps = body.get("steps") or []
+    if not site_id or not name or len(steps) < 2:
+        return _resp(400, {"error": "site_id, name, and at least 2 steps required"})
+    funnel_id = name.lower().replace(" ", "-")[:32]
+    clean_steps = []
+    for s in steps[:10]:
+        step_type = s.get("type", "page")  # "page" or "event"
+        step_value = (s.get("value") or "")[:128]
+        step_label = (s.get("label") or step_value)[:64]
+        if step_value:
+            clean_steps.append({"type": step_type, "value": step_value, "label": step_label})
+    if len(clean_steps) < 2:
+        return _resp(400, {"error": "at least 2 valid steps required"})
+    table.put_item(Item={
+        "pk": f"FUNNELS#{site_id}",
+        "sk": funnel_id,
+        "name": name,
+        "steps": json.dumps(clean_steps),
+    })
+    return _resp(201, {"id": funnel_id, "name": name, "steps": clean_steps})
+
+
+def _delete_funnel(body):
+    site_id = (body.get("site_id") or "").strip()
+    funnel_id = (body.get("id") or "").strip()
+    if not site_id or not funnel_id:
+        return _resp(400, {"error": "site_id and id required"})
+    table.delete_item(Key={"pk": f"FUNNELS#{site_id}", "sk": funnel_id})
+    return _resp(200, {"deleted": funnel_id})
+
+
+def _get_funnels(params):
+    """List funnels with conversion data for the date range."""
+    site_id = params.get("site_id", "")
+    if not site_id:
+        return _resp(400, {"error": "missing site_id"})
+
+    days = min(int(params.get("days", 7)), 90)
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=days - 1)
+
+    funnel_items = _query_all(f"FUNNELS#{site_id}")
+    if not funnel_items:
+        return _resp(200, {"funnels": []})
+
+    # Collect raw pageviews and events per visitor
+    visitor_pages: dict = {}  # visitor -> [(timestamp, path)]
+    visitor_events: dict = {}  # visitor -> [(timestamp, event_name)]
+
+    current = start_date
+    while current <= end_date:
+        date_str = current.strftime("%Y-%m-%d")
+        # Raw pageviews
+        pv_items = _query_all(f"{site_id}#{date_str}")
+        for item in pv_items:
+            v = item.get("visitor", "")
+            ts = item["sk"].split("#")[0]
+            path = item.get("path", "")
+            visitor_pages.setdefault(v, []).append((ts, path))
+        # Raw events
+        ev_items = _query_all(f"EVENT#{site_id}#{date_str}")
+        for item in ev_items:
+            v = item.get("visitor", "")
+            ts = item["sk"].split("#")[0]
+            name = item.get("event_name", "")
+            visitor_events.setdefault(v, []).append((ts, name))
+        current += timedelta(days=1)
+
+    # Sort by timestamp
+    for v in visitor_pages:
+        visitor_pages[v].sort()
+    for v in visitor_events:
+        visitor_events[v].sort()
+
+    all_visitors = set(visitor_pages.keys()) | set(visitor_events.keys())
+
+    funnels = []
+    for f in funnel_items:
+        steps = json.loads(f.get("steps", "[]"))
+        step_counts = [0] * len(steps)
+
+        for visitor in all_visitors:
+            pages = visitor_pages.get(visitor, [])
+            events = visitor_events.get(visitor, [])
+            # Check how far this visitor progresses through the funnel (in order)
+            page_idx = 0
+            event_idx = 0
+            for i, step in enumerate(steps):
+                matched = False
+                if step["type"] == "page":
+                    while page_idx < len(pages):
+                        if pages[page_idx][1] == step["value"]:
+                            matched = True
+                            page_idx += 1
+                            break
+                        page_idx += 1
+                elif step["type"] == "event":
+                    while event_idx < len(events):
+                        if events[event_idx][1] == step["value"]:
+                            matched = True
+                            event_idx += 1
+                            break
+                        event_idx += 1
+                if matched:
+                    step_counts[i] += 1
+                else:
+                    break  # Visitor didn't complete this step
+
+        funnel_steps = []
+        for i, step in enumerate(steps):
+            drop_off = 0
+            if i > 0 and step_counts[i - 1] > 0:
+                drop_off = round((1 - step_counts[i] / step_counts[i - 1]) * 100, 1)
+            funnel_steps.append({
+                "label": step.get("label", step["value"]),
+                "type": step["type"],
+                "value": step["value"],
+                "visitors": step_counts[i],
+                "dropOff": drop_off,
+            })
+
+        conv_rate = 0
+        if step_counts[0] > 0:
+            conv_rate = round(step_counts[-1] / step_counts[0] * 100, 1)
+
+        funnels.append({
+            "id": f["sk"],
+            "name": f.get("name", f["sk"]),
+            "steps": funnel_steps,
+            "conversionRate": conv_rate,
+        })
+
+    return _resp(200, {"funnels": funnels})
 
 
 def _resp(status, body):
