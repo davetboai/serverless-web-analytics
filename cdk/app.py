@@ -1,15 +1,25 @@
 #!/usr/bin/env python3
+import os
+
 import aws_cdk as cdk
+from dotenv import load_dotenv
 from stacks.analytics_stack import AnalyticsStack
+
+load_dotenv()
 
 app = cdk.App()
 
-domain_name = app.node.try_get_context("domain_name")  # e.g. analytics.example.com
-hosted_zone_id = app.node.try_get_context("hosted_zone_id")
-hosted_zone_name = app.node.try_get_context("hosted_zone_name")
-certificate_arn = app.node.try_get_context("certificate_arn")
-cognito_user_pool_id = app.node.try_get_context("cognito_user_pool_id")
-cognito_client_id = app.node.try_get_context("cognito_client_id")
+
+def config(context_key: str, env_key: str) -> str | None:
+    return app.node.try_get_context(context_key) or os.environ.get(env_key)
+
+
+domain_name = config("domain_name", "DOMAIN_NAME")  # e.g. analytics.example.com
+hosted_zone_id = config("hosted_zone_id", "HOSTED_ZONE_ID")
+hosted_zone_name = config("hosted_zone_name", "HOSTED_ZONE_NAME")
+certificate_arn = config("certificate_arn", "CERTIFICATE_ARN")
+cognito_user_pool_id = config("cognito_user_pool_id", "COGNITO_USER_POOL_ID")
+cognito_client_id = config("cognito_client_id", "COGNITO_CLIENT_ID")
 
 AnalyticsStack(
     app,
